@@ -25,8 +25,11 @@ def load_stl(path: Path, repair: bool = False) -> trimesh.Trimesh:
     if repair:
         with progress.step("repair input mesh"):
             mesh.merge_vertices()
-            mesh.remove_duplicate_faces()
-            mesh.remove_degenerate_faces()
+            # trimesh >= 4 removed the `remove_duplicate_faces` /
+            # `remove_degenerate_faces` instance methods; use the
+            # `update_faces` + face-mask helpers instead.
+            mesh.update_faces(mesh.unique_faces())
+            mesh.update_faces(mesh.nondegenerate_faces())
             mesh.fix_normals()
             trimesh.repair.fill_holes(mesh)
             mesh.process(validate=True)
