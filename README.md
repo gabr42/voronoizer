@@ -118,20 +118,40 @@ pattern later:
 voronoizer cube_100mm.stl "cube_chamfer_{seed}.stl" -t 2 -n 60 -s 2 --chamfer 0.5
 ```
 
+A CAD-like model with smooth filleted edges — lower `--soft-edge-angle` so
+seeds get pushed off the fillets:
+
+```
+voronoizer body.stl "body_{seed}.stl" -t 2 -n 30 -s 2 --chamfer 0.5 --soft-edge-angle 10
+```
+
 ## Limitations
 
-- **Chamfer on highly curved surfaces.** The chamfer bevel is built in
-  each seed's tangent frame; on a strongly curved wall (e.g. a sphere) the
-  bevel is most visible at the centre of each hole and fades out toward
-  the hole boundary. On flat faces (cubes, cylinder caps) the chamfer is
-  uniform.
+- **CAD models with smoothly filleted edges.** The seed-rejection logic
+  detects sharp edges by dihedral angle (default 25°). On a CAD model
+  whose corners are smoothly filleted, no edges qualify as "sharp" and
+  seeds land *on* the fillets, where the local surface normal varies
+  rapidly. The resulting prisms can produce chewed-up walls near the
+  fillets. **Lower `--soft-edge-angle`** (e.g. to 10°) to make the
+  rejection logic catch the fillet curves and push seeds onto the flat
+  faces. The default 25° is right for boxy meshes with crisp corners.
 - **Very thin shells or thin features.** If `--shell-thickness` exceeds
   the thinnest cross-section of the input, the shell construction can
   produce empty or degenerate results. Keep shell thickness comfortably
   smaller than the model's thinnest feature.
-- **Non-manifold input.** `--repair` is best-effort. Pathologically broken
-  STLs may need pre-processing in a dedicated repair tool (e.g. MeshLab,
-  Blender) before voronoization.
+- **Highly curved surfaces with sparse seeds.** The Voronoi-cell-to-prism
+  construction assumes each cell spans a moderate angular range. On a
+  sparsely seeded sphere (e.g. 30 holes on a 50 mm radius) the algorithm
+  still produces watertight output, but some cell prisms touch each
+  other at near-tangencies; modern slicers handle this transparently.
+- **Low-poly input meshes.** Inputs with very few triangles relative to
+  the feature size make the per-vertex surface projection less reliable
+  (polygon vertices can snap to faces in neighbouring cells' territory).
+  Re-meshing the input to ~5-10x denser geometry before voronoization
+  reliably fixes this.
+- **Non-manifold input.** `--repair` is best-effort. Pathologically
+  broken STLs may need pre-processing in a dedicated repair tool (e.g.
+  MeshLab, Blender) before voronoization.
 
 ## Authors
 

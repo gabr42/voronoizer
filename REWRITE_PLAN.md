@@ -203,3 +203,16 @@ pathological case) actually bother in practice.
   same visible chamfer, zero non-manifold edges, zero open boundaries.
   Phase 2's geodesic Voronoi rewrite is no longer needed to ship a
   clean STL.
+- ⚠️ **CAD-like filleted models** (e.g. small parts with smoothly
+  rounded edges between main faces, max dihedral ~10-15°): seeds land
+  on the fillets themselves where the local normal varies rapidly, and
+  polygon vertices nearby project across the fillet to faces in
+  neighbouring cells' territories. Result: chewed-up walls near the
+  fillets. **Partial mitigation**: lower the seed-rejection threshold
+  via the `--soft-edge-angle` CLI flag (e.g. 10°) so the fillets count
+  as "sharp" enough to push seeds away. Tested on a small CAD body
+  (36 × 19.5 × 10 mm): default 25° gives ~2 non-manifold edges plus
+  visible artefacts; `--soft-edge-angle 10` gives a fully watertight
+  STL with no visible artefacts in most cases, though some specific
+  seed positions can still produce minor issues. The proper structural
+  fix for this class of model is still Phase 2 (geodesic Voronoi).
