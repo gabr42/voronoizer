@@ -14,7 +14,7 @@ from voronoizer.mirror_seeds import (
     compute_boundary_mirrors,
     compute_sharp_edge_twins,
 )
-from voronoizer.perforate import cleanup_mesh, perforate
+from voronoizer.perforate import perforate
 from voronoizer.seeding import Seeds, sample_seeds
 from voronoizer.shell import build_shell
 from voronoizer.voronoi_cells import build_shrunken_cells
@@ -115,9 +115,6 @@ def run(
 
     with progress.step("perforate shell"):
         perforated = perforate(shell, cells)
-
-    with progress.step("clean up mesh"):
-        perforated = cleanup_mesh(perforated)
 
     with progress.step("write STL"):
         save_stl(perforated, output_path)
