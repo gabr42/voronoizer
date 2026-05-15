@@ -170,15 +170,22 @@ seed density where polygon vertices stay within ~half the sphere's radius.
 Only commit to Phase 2 if Phase 1's residual artifacts (the elongated-polygon
 pathological case) actually bother in practice.
 
-## Phase 1 outcome (so far)
+## Phase 1 outcome
 
 - ✅ **Flat surfaces** (cube, cylinder caps): chamfer is bit-identical to the
   pre-rewrite simple-chamfer path. No regression.
 - ✅ **In-memory correctness**: the boolean result is watertight on the
   sphere too. The Phase 1 prism puts each chamfer ring on the *actual*
   surface, so the bevel is uniform around every hole.
+- ✅ **No more shell islands inside holes**: an earlier draft anchored the
+  cap centroid at `mean(cap_top_ring)`, which on a sphere with wide-angular
+  cells fell *inside* the sphere (average of points on a sphere is
+  interior). The cap wheel then formed a cone tip pointing inward and the
+  boolean left small islands of shell material inside each hole. Fixed by
+  anchoring the cap centroid at `seed ± k·seed_normal`, which is
+  guaranteed to lie outside the shell along the seed's outward direction.
 - ⚠️ **STL / PLY / OBJ round-trip**: on highly curved surfaces with sparse
-  seeds, the boolean output contains ~270 *twin vertices* (two distinct
+  seeds, the boolean output contains ~250 *twin vertices* (two distinct
   topological vertices at the same 3D location), produced by manifold3d
   where adjacent Voronoi cells are very nearly tangent on the curved
   surface. Standard mesh loaders dedupe these twins on load, which breaks
@@ -192,10 +199,7 @@ pathological case) actually bother in practice.
   - Some slicers may still handle the twin-vertex geometry gracefully; this
     needs in-print validation.
 
-**This is a Phase 2 problem to properly fix.** A geodesic Voronoi tessellation
-produces cell boundaries that are gap-free on the surface by construction, so
-the boolean won't need to manufacture twin vertices at near-tangencies.
-
-For now, **the chamfer option remains usable on flat surfaces** (the original
-target use case) and **degrades gracefully on curved ones** (the in-memory
-geometry is correct; only the file-format topology suffers).
+**The twin-vertex issue is a Phase 2 problem to properly fix.** A geodesic
+Voronoi tessellation produces cell boundaries that are gap-free on the
+surface by construction, so the boolean won't need to manufacture twin
+vertices at near-tangencies.

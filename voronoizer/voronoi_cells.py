@@ -286,6 +286,8 @@ def _build_prism_surface_aware(
     P: np.ndarray,
     n: np.ndarray,
     d_out: np.ndarray,
+    seed: np.ndarray,
+    seed_normal: np.ndarray,
     shell_thickness: float,
     chamfer: float,
     safety: float,
@@ -296,6 +298,14 @@ def _build_prism_surface_aware(
     built per-vertex along the local frame, so the chamfer rings 1/4 always
     sit on the actual outer / inner shell surface and the bevel is visible
     at every part of the hole boundary, even on curved surfaces.
+
+    The cap centroids are anchored to `seed ± k·seed_normal` rather than the
+    mean of the ring's own vertices: on a curved surface the mean of points
+    spread over a wide angular cap can fall *inside* the sphere (the average
+    of points on a sphere is interior), turning the cap into a cone tip
+    pointing inward and leaving small islands of shell in the middle of the
+    hole. Anchoring at the seed keeps the cap centroid strictly outside the
+    shell.
     """
     N = len(polygon_2d)
     chamf_lat = chamfer * d_out  # (N, 3)
@@ -306,14 +316,8 @@ def _build_prism_surface_aware(
     ring3 = P - (shell_thickness - chamfer) * n
     ring4 = P - shell_thickness * n + chamf_lat
     ring5 = ring4 - safety * n
-    # Cap centroids (one extra vertex each) — using a fan from a centroid
-    # produces a regular "wheel" of triangles instead of a tall fan from
-    # vertex 0. That avoids a single super-high-degree vertex on each cap,
-    # which on Phase 1's twisted side walls was breaking topology after the
-    # STL round-trip (float32 precision drift on a vertex shared by many
-    # faces creates a few non-manifold edges).
-    cap_top_centroid = ring0.mean(axis=0)
-    cap_bot_centroid = ring5.mean(axis=0)
+    cap_top_centroid = seed + safety * seed_normal
+    cap_bot_centroid = seed - (shell_thickness + safety) * seed_normal
     verts = np.vstack([ring0, ring1, ring2, ring3, ring4, ring5,
                        cap_top_centroid[None, :], cap_bot_centroid[None, :]])
 
@@ -564,6 +568,7 @@ def build_shrunken_cells(
                 safety = max(1.0, shell_thickness)
                 prism = _build_prism_surface_aware(
                     smooth_poly, P_pv, n_pv, d_pv,
+                    seed=seed, seed_normal=normal,
                     shell_thickness=shell_thickness,
                     chamfer=chamfer,
                     safety=safety,
