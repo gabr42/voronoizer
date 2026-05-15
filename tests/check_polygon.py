@@ -15,7 +15,7 @@ m = load_stl(r"H:\RAZVOJ\voronoizer\tests\data\sphere_r20mm.stl")
 rng = np.random.default_rng(3)
 seeds = sample_seeds(m, 30, top_bottom_only=False, angle_deg=30.0,
                     rng=rng, strut_thickness=1.5)
-cells, _ = build_shrunken_cells(seeds, m.bounds, 1.0, 1.5)
+cells, _ = build_shrunken_cells(seeds, m, 1.0, 1.5)
 
 for i in (0, 5, 10, 15, 20):
     p = polys[i]

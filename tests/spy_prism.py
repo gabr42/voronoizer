@@ -17,7 +17,7 @@ m = load_stl(r"H:\RAZVOJ\voronoizer\tests\data\sphere_r20mm.stl")
 rng = np.random.default_rng(3)
 seeds = sample_seeds(m, 30, top_bottom_only=False, angle_deg=30.0,
                     rng=rng, strut_thickness=1.5)
-cells, _ = build_shrunken_cells(seeds, m.bounds, 1.0, 1.5)
+cells, _ = build_shrunken_cells(seeds, m, 1.0, 1.5)
 print(f"_build_prism called {len(calls)} times")
 shown = [f"{r:.2f}" if isinstance(r, float) and np.isfinite(r) else "inf"
         for r in calls[:8]]

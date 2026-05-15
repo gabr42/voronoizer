@@ -17,7 +17,7 @@ def run(use_taper):
                         rng=rng, strut_thickness=1.5)
 
     if use_taper:
-        cells, _ = build_shrunken_cells(seeds, m.bounds, 1.0, 1.5)
+        cells, _ = build_shrunken_cells(seeds, m, 1.0, 1.5)
     else:
         # Override _build_prism with one that ignores R_local
         orig = vc._build_prism
@@ -26,7 +26,7 @@ def run(use_taper):
             return orig(*args, **kwargs)
         vc._build_prism = flat
         try:
-            cells, _ = build_shrunken_cells(seeds, m.bounds, 1.0, 1.5)
+            cells, _ = build_shrunken_cells(seeds, m, 1.0, 1.5)
         finally:
             vc._build_prism = orig
 

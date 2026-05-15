@@ -23,7 +23,7 @@ seeds = sample_seeds(mesh, HOLES, top_bottom_only=False, angle_deg=30.0,
                      rng=rng, strut_thickness=STRUT)
 cells, _ = build_shrunken_cells(
     seeds=seeds,
-    mesh_bounds=mesh.bounds,
+    mesh=mesh,
     shell_thickness=THICKNESS,
     strut_thickness=STRUT,
 )

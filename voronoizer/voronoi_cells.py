@@ -201,6 +201,149 @@ def _expand_polygon_centroid(polygon_2d: np.ndarray, offset: float) -> np.ndarra
     return polygon_2d + (rel / np.maximum(dist, 1e-9)) * offset
 
 
+# Cone half-angle (cosine) used to decide whether the surface point a polygon
+# vertex projects onto belongs to the seed's "local" patch. If the projected
+# face normal disagrees with the seed normal by more than this cone, fall back
+# to the seed's frame for that vertex — keeps a cell that spans a sharp
+# dihedral edge from latching onto a neighbouring face.
+_PHASE1_FALLBACK_COS = 0.5
+
+
+def _surface_frames(
+    polygon_2d: np.ndarray,
+    seed: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    seed_normal: np.ndarray,
+    proximity,
+    face_normals: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """For each polygon vertex, compute (P_i, n_i, d_i).
+
+    P_i is the nearest point on the input mesh to the tangent-plane vertex;
+    n_i is the local outward normal there (face normal); d_i is the centroid-
+    radial direction taken in seed's tangent frame and re-projected into P_i's
+    tangent plane so the chamfer offset stays in-surface.
+
+    Where the projected normal disagrees with the seed normal by more than
+    ~60° (`_PHASE1_FALLBACK_COS`), fall back to the seed's own frame for that
+    vertex.
+    """
+    p3d = seed + polygon_2d[:, 0:1] * u + polygon_2d[:, 1:2] * v  # (N, 3)
+    closest, _dist, face_ids = proximity.on_surface(p3d)
+    P_proj = np.asarray(closest, dtype=float)
+    n_proj = np.asarray(face_normals[face_ids], dtype=float)
+
+    # Outward direction at each vertex as the bisector of its two adjacent
+    # edges' outward perpendiculars (the standard 2D polygon-offset rule).
+    # Earlier versions used a centroid-radial direction, which on highly
+    # asymmetric polygons (typical of sparse Voronoi seeds on a sphere)
+    # didn't point cleanly perpendicular to either adjacent edge — chamfer
+    # offsets in that direction occasionally brought adjacent cells almost
+    # to a tangent kiss, producing twin vertices in the boolean output.
+    prev_v = np.roll(polygon_2d, 1, axis=0)
+    next_v = np.roll(polygon_2d, -1, axis=0)
+    e_prev = polygon_2d - prev_v
+    e_next = next_v - polygon_2d
+    # CCW polygon → outward perpendicular is rotate-by-(-90°): (y, -x).
+    perp_prev = np.column_stack([e_prev[:, 1], -e_prev[:, 0]])
+    perp_next = np.column_stack([e_next[:, 1], -e_next[:, 0]])
+    perp_prev = perp_prev / np.maximum(
+        np.linalg.norm(perp_prev, axis=1, keepdims=True), 1e-9
+    )
+    perp_next = perp_next / np.maximum(
+        np.linalg.norm(perp_next, axis=1, keepdims=True), 1e-9
+    )
+    dir_2d = perp_prev + perp_next
+    dir_2d = dir_2d / np.maximum(
+        np.linalg.norm(dir_2d, axis=1, keepdims=True), 1e-9
+    )
+    dir_3d = dir_2d[:, 0:1] * u + dir_2d[:, 1:2] * v  # (N, 3)
+
+    # Fallback mask: use projected frame only when the projected face faces
+    # roughly the same way as the seed.
+    cos_agree = n_proj @ seed_normal
+    use_proj = cos_agree > _PHASE1_FALLBACK_COS
+
+    seed_n_b = np.broadcast_to(seed_normal, n_proj.shape)
+    P = np.where(use_proj[:, None], P_proj, p3d)
+    n = np.where(use_proj[:, None], n_proj, seed_n_b)
+    # Re-orthonormalise the per-vertex normal we just chose.
+    n_len = np.linalg.norm(n, axis=1, keepdims=True)
+    n = n / np.maximum(n_len, 1e-12)
+
+    # Re-project the centroid-radial direction into each P_i's tangent plane.
+    dot = np.einsum("ij,ij->i", dir_3d, n)
+    dir_in_tangent = dir_3d - dot[:, None] * n
+    proj_len = np.linalg.norm(dir_in_tangent, axis=1, keepdims=True)
+    d_out = dir_in_tangent / np.maximum(proj_len, 1e-9)
+
+    return P, n, d_out
+
+
+def _build_prism_surface_aware(
+    polygon_2d: np.ndarray,
+    P: np.ndarray,
+    n: np.ndarray,
+    d_out: np.ndarray,
+    shell_thickness: float,
+    chamfer: float,
+    safety: float,
+) -> trimesh.Trimesh:
+    """Phase-1 surface-aware chamfered prism.
+
+    Each polygon vertex i has its own (P_i, n_i, d_i). Ring positions are
+    built per-vertex along the local frame, so the chamfer rings 1/4 always
+    sit on the actual outer / inner shell surface and the bevel is visible
+    at every part of the hole boundary, even on curved surfaces.
+    """
+    N = len(polygon_2d)
+    chamf_lat = chamfer * d_out  # (N, 3)
+
+    ring0 = P + chamf_lat + safety * n
+    ring1 = P + chamf_lat
+    ring2 = P - chamfer * n
+    ring3 = P - (shell_thickness - chamfer) * n
+    ring4 = P - shell_thickness * n + chamf_lat
+    ring5 = ring4 - safety * n
+    # Cap centroids (one extra vertex each) — using a fan from a centroid
+    # produces a regular "wheel" of triangles instead of a tall fan from
+    # vertex 0. That avoids a single super-high-degree vertex on each cap,
+    # which on Phase 1's twisted side walls was breaking topology after the
+    # STL round-trip (float32 precision drift on a vertex shared by many
+    # faces creates a few non-manifold edges).
+    cap_top_centroid = ring0.mean(axis=0)
+    cap_bot_centroid = ring5.mean(axis=0)
+    verts = np.vstack([ring0, ring1, ring2, ring3, ring4, ring5,
+                       cap_top_centroid[None, :], cap_bot_centroid[None, :]])
+
+    n_rings = 6
+    faces: list[list[int]] = []
+    # Side walls between consecutive rings.
+    for r in range(n_rings - 1):
+        a = r * N
+        b = (r + 1) * N
+        for i in range(N):
+            j = (i + 1) % N
+            faces.append([a + i, a + j, b + j])
+            faces.append([a + i, b + j, b + i])
+    cap_top_idx = n_rings * N
+    cap_bot_idx = n_rings * N + 1
+    # Top cap wheel — outward-facing.
+    for i in range(N):
+        faces.append([cap_top_idx, i, (i + 1) % N])
+    # Bottom cap wheel — reversed for outward -normal facing.
+    bot_off = (n_rings - 1) * N
+    for i in range(N):
+        faces.append([cap_bot_idx, bot_off + ((i + 1) % N), bot_off + i])
+
+    mesh_obj = trimesh.Trimesh(
+        vertices=verts, faces=np.asarray(faces, dtype=int), process=False
+    )
+    mesh_obj.fix_normals()
+    return mesh_obj
+
+
 def _build_prism(
     polygon_2d: np.ndarray,
     seed: np.ndarray,
@@ -305,7 +448,7 @@ def _build_prism(
 
 def build_shrunken_cells(
     seeds: Seeds,
-    mesh_bounds: np.ndarray,
+    mesh: trimesh.Trimesh,
     shell_thickness: float,
     strut_thickness: float,
     mirror_seeds: np.ndarray | None = None,
@@ -313,6 +456,12 @@ def build_shrunken_cells(
     chamfer: float = 0.0,
 ) -> tuple[list[trimesh.Trimesh], CellBuildStats]:
     """Build a smooth-edge prism cutter for each seed.
+
+    `mesh` is the surface the seeds were sampled from (full input mesh, or
+    the top/bottom submesh in `--top-bottom-only` mode). It's used to project
+    polygon vertices onto the actual surface so the chamfer rings sit on the
+    real outer / inner shell surface at every vertex (Phase 1 surface-aware
+    prism). The non-chamfer path is unchanged.
 
     `chamfer` (mm) bevels the hole edges where they meet the shell surfaces.
     Clamped to keep struts and the straight wall section non-degenerate.
@@ -327,6 +476,17 @@ def build_shrunken_cells(
             f"chamfer {chamfer_in:.3f} mm clamped to {chamfer:.3f} mm "
             f"(limit: min(0.49 * strut, 0.49 * shell_thickness))"
         )
+
+    mesh_bounds = mesh.bounds
+
+    # Build a single proximity query for surface projection (chamfer path).
+    proximity = None
+    face_normals = None
+    if chamfer > 0.0:
+        from trimesh.proximity import ProximityQuery
+        proximity = ProximityQuery(mesh)
+        face_normals = np.asarray(mesh.face_normals, dtype=float)
+
     n_real = len(seeds)
     pieces = [seeds.points]
     n_mirror = 0
@@ -392,12 +552,29 @@ def build_shrunken_cells(
         smooth_poly = _bezier_smooth(inset_poly, bezier_samples_per_edge)
 
         try:
-            prism = _build_prism(
-                smooth_poly, seed, normal, u, v, out_h, in_h,
-                R_local=R_local,
-                shell_thickness=shell_thickness,
-                chamfer=chamfer,
-            )
+            if chamfer > 0.0:
+                # Phase 1: chamfer path is built per-vertex on the actual
+                # surface, with each column getting its own local frame.
+                P_pv, n_pv, d_pv = _surface_frames(
+                    smooth_poly, seed, u, v, normal, proximity, face_normals
+                )
+                # Generous cap safety past each surface: the boolean operates
+                # better with a thick prism than a sliver, and the part past
+                # the shell is clipped away anyway.
+                safety = max(1.0, shell_thickness)
+                prism = _build_prism_surface_aware(
+                    smooth_poly, P_pv, n_pv, d_pv,
+                    shell_thickness=shell_thickness,
+                    chamfer=chamfer,
+                    safety=safety,
+                )
+            else:
+                prism = _build_prism(
+                    smooth_poly, seed, normal, u, v, out_h, in_h,
+                    R_local=R_local,
+                    shell_thickness=shell_thickness,
+                    chamfer=chamfer,
+                )
         except Exception:
             stats.degenerate += 1
             continue

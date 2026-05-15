@@ -106,7 +106,7 @@ def run(
     with progress.step("build & smooth cells"):
         cells, _stats = build_shrunken_cells(
             seeds=seeds,
-            mesh_bounds=mesh.bounds,
+            mesh=edge_source,
             shell_thickness=shell_thickness,
             strut_thickness=strut_thickness,
             mirror_seeds=mirrors,
