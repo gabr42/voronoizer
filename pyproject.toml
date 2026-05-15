@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voronoizer"
+version = "0.1.0"
+description = "Turn an STL into a Voronoi-perforated shell."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Primoz Gabrijelcic", email = "gabr42@gmail.com" }]
+license = { text = "MIT" }
+dependencies = [
+    "trimesh>=4.4",
+    "manifold3d>=2.5",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "tqdm>=4.66",
+    "networkx>=3.0",
+    "scikit-image>=0.22",
+]
+
+[project.scripts]
+voronoizer = "voronoizer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["voronoizer*"]

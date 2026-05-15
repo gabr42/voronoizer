@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+
+# Ignore all STLs by default; the test-input STLs are explicitly tracked below.
+*.stl
+!tests/data/cube_100mm.stl
+!tests/data/sphere_r20mm.stl
+!tests/data/sphere_r50mm.stl
+!tests/data/cyl_r30_h120mm.stl
