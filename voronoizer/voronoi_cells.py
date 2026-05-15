@@ -293,67 +293,80 @@ def _build_prism_surface_aware(
     chamfer: float,
     safety: float,
 ) -> trimesh.Trimesh:
-    """Phase-1 surface-aware chamfered prism.
+    """Phase-1 surface-aware prism cutter.
 
     Each polygon vertex i has its own (P_i, n_i, d_i). Ring positions are
-    built per-vertex along the local frame, so the chamfer rings 1/4 always
-    sit on the actual outer / inner shell surface and the bevel is visible
-    at every part of the hole boundary, even on curved surfaces.
+    built per-vertex along the local frame, so the hole edge always sits on
+    the actual shell surface — even on curved surfaces where a single
+    seed-tangent prism would intersect the curved surface at a shallow
+    angle and produce non-tangent cuts.
 
-    The top cap centroid is pushed `R_local` mm along the seed's normal on
-    curved surfaces (else just `safety` mm on flat ones). A planar
-    cap-wheel triangle from a low centroid to a ring0 vertex on a sphere is
-    a *chord* across the outer surface — its midpoint lies *inside* the
-    sphere whenever the ring0 vertex is more than ~20° off the seed-axis,
-    and the chord cuts back through the shell. Putting the centroid at
+    With `chamfer > 0`, six rings: cap-top, outer chamfered, chamfer end,
+    inner chamfer start, inner chamfered, cap-bot. The chamfered rings are
+    lifted 0.05 mm off the surface along each `n_i` on curved meshes —
+    that breaks the near-tangencies that otherwise make manifold3d emit
+    twin vertices (the polygon expansion is widened to compensate so the
+    visible chamfer width is unchanged).
+
+    With `chamfer = 0`, four rings: cap-top, outer, inner, cap-bot. The
+    outer and inner rings sit exactly on the corresponding shell
+    surfaces at each polygon vertex. No lift needed — there are no
+    chamfered positions for adjacent cells to share.
+
+    The top cap centroid is pushed `max(safety, R_local)` mm along the
+    seed's normal on curved surfaces. A planar cap-wheel triangle from a
+    low centroid to a ring0 vertex on a sphere is a *chord* across the
+    outer surface — its midpoint lies inside the sphere whenever the
+    ring0 vertex is more than ~20° off the seed-axis, and the chord
+    would cut back through the shell. Putting the centroid at
     `seed + R_local · seed_normal` guarantees every chord midpoint stays
-    outside the parallel sphere for polygon spreads up to 90°.
-
-    The bottom cap stays near the seed (inside the sphere is empty space,
-    so cap-triangles dipping further inward there are harmless).
+    outside the parallel sphere for polygon spreads up to 90°. The
+    bottom cap stays near the seed (inside the sphere is empty space, so
+    cap-triangles dipping further inward there are harmless).
     """
     N = len(polygon_2d)
+    curved = np.isfinite(R_local) and R_local > 0.0
 
-    # On curved surfaces, lift the chamfered rings 0.05 mm into the air
-    # outside the shell along each polygon vertex's local normal. That
-    # displaces the *exact* chamfered polygon positions off the surface so
-    # manifold3d cuts the prism at the surface inside the chamfer
-    # transition rather than exactly at the chamfered position. Adjacent
-    # cells then don't share a coincident point on the surface and the
-    # twin-vertex slivers (~500 non-manifold edges per sphere STL) go away.
-    #
-    # To keep the visible chamfer width the same, the polygon expansion is
-    # widened by `lift` so the boolean's cross-section at altitude 0
-    # interpolates back to exactly `chamfer` mm. Bevel angle stays 45°.
-    #
-    # On flat surfaces (cube faces, cylinder caps) the lift is 0 — there
-    # are no near-tangencies to break, and the lift would only reduce the
-    # visible chamfer slightly.
-    if np.isfinite(R_local) and R_local > 0.0:
-        lift = 0.05
+    if chamfer > 0.0:
+        # Lift the chamfered rings 0.05 mm off the surface so manifold3d
+        # cuts the prism in the chamfer transition rather than exactly at
+        # the chamfered position; widen the polygon expansion to keep the
+        # visible chamfer width the same. Flat surfaces skip the lift —
+        # they have no near-tangencies to break, and the lift would only
+        # reduce the visible chamfer.
+        lift = 0.05 if curved else 0.0
         expansion = chamfer + lift
+        chamf_lat = expansion * d_out  # (N, 3)
+        ring_pos = [
+            P + chamf_lat + safety * n,                          # 0: cap top
+            P + chamf_lat + lift * n,                            # 1: outer chamfered
+            P - chamfer * n,                                     # 2: chamfer end
+            P - (shell_thickness - chamfer) * n,                 # 3: inner chamfer start
+            P - shell_thickness * n + chamf_lat - lift * n,      # 4: inner chamfered
+            P - shell_thickness * n + chamf_lat - lift * n - safety * n,  # 5: cap bot
+        ]
     else:
-        lift = 0.0
-        expansion = chamfer
-    chamf_lat = expansion * d_out  # (N, 3)
+        # No-chamfer surface-aware prism still needs to lift the outer /
+        # inner surface rings 0.05 mm off the shell on curved meshes —
+        # adjacent cells' walls follow the curve closely and manifold3d
+        # otherwise sees them as near-tangent at the surface, producing
+        # twin-vertex slivers. The lateral position is the same on both
+        # sides of the lift, so the visible hole shape is unchanged.
+        lift = 0.05 if curved else 0.0
+        ring_pos = [
+            P + safety * n,                                      # 0: cap top
+            P + lift * n,                                        # 1: outer surface
+            P - shell_thickness * n - lift * n,                  # 2: inner surface
+            P - shell_thickness * n - safety * n,                # 3: cap bot
+        ]
+    n_rings = len(ring_pos)
 
-    ring0 = P + chamf_lat + safety * n
-    ring1 = P + chamf_lat + lift * n
-    ring2 = P - chamfer * n
-    ring3 = P - (shell_thickness - chamfer) * n
-    ring4 = P - shell_thickness * n + chamf_lat - lift * n
-    ring5 = ring4 - safety * n
-
-    if np.isfinite(R_local) and R_local > 0.0:
-        cap_top_height = max(safety, R_local)
-    else:
-        cap_top_height = safety
+    cap_top_height = max(safety, R_local) if curved else safety
     cap_top_centroid = seed + cap_top_height * seed_normal
     cap_bot_centroid = seed - (shell_thickness + safety) * seed_normal
-    verts = np.vstack([ring0, ring1, ring2, ring3, ring4, ring5,
-                       cap_top_centroid[None, :], cap_bot_centroid[None, :]])
+    verts = np.vstack(ring_pos + [cap_top_centroid[None, :],
+                                  cap_bot_centroid[None, :]])
 
-    n_rings = 6
     faces: list[list[int]] = []
     # Side walls between consecutive rings.
     for r in range(n_rings - 1):
@@ -515,13 +528,13 @@ def build_shrunken_cells(
 
     mesh_bounds = mesh.bounds
 
-    # Build a single proximity query for surface projection (chamfer path).
-    proximity = None
-    face_normals = None
-    if chamfer > 0.0:
-        from trimesh.proximity import ProximityQuery
-        proximity = ProximityQuery(mesh)
-        face_normals = np.asarray(mesh.face_normals, dtype=float)
+    # Build a single proximity query for surface projection. Used by *every*
+    # cell -- both the chamfered and non-chamfered paths now go through the
+    # surface-aware prism builder so the hole edges sit on the actual shell
+    # surface even when the polygon spans a wide angular cap on a sphere.
+    from trimesh.proximity import ProximityQuery
+    proximity = ProximityQuery(mesh)
+    face_normals = np.asarray(mesh.face_normals, dtype=float)
 
     n_real = len(seeds)
     pieces = [seeds.points]
@@ -588,31 +601,25 @@ def build_shrunken_cells(
         smooth_poly = _bezier_smooth(inset_poly, bezier_samples_per_edge)
 
         try:
-            if chamfer > 0.0:
-                # Phase 1: chamfer path is built per-vertex on the actual
-                # surface, with each column getting its own local frame.
-                P_pv, n_pv, d_pv = _surface_frames(
-                    smooth_poly, seed, u, v, normal, proximity, face_normals
-                )
-                # Generous cap safety past each surface: the boolean operates
-                # better with a thick prism than a sliver, and the part past
-                # the shell is clipped away anyway.
-                safety = max(1.0, shell_thickness)
-                prism = _build_prism_surface_aware(
-                    smooth_poly, P_pv, n_pv, d_pv,
-                    seed=seed, seed_normal=normal,
-                    R_local=R_local,
-                    shell_thickness=shell_thickness,
-                    chamfer=chamfer,
-                    safety=safety,
-                )
-            else:
-                prism = _build_prism(
-                    smooth_poly, seed, normal, u, v, out_h, in_h,
-                    R_local=R_local,
-                    shell_thickness=shell_thickness,
-                    chamfer=chamfer,
-                )
+            # Phase 1: every cell is built per-vertex on the actual surface,
+            # with each column getting its own local frame. The chamfer=0
+            # path is a four-ring tube (cap-top / outer / inner / cap-bot);
+            # the chamfer>0 path adds two more rings for the bevel.
+            P_pv, n_pv, d_pv = _surface_frames(
+                smooth_poly, seed, u, v, normal, proximity, face_normals
+            )
+            # Generous cap safety past each surface: the boolean operates
+            # better with a thick prism than a sliver, and the part past
+            # the shell is clipped away anyway.
+            safety = max(1.0, shell_thickness)
+            prism = _build_prism_surface_aware(
+                smooth_poly, P_pv, n_pv, d_pv,
+                seed=seed, seed_normal=normal,
+                R_local=R_local,
+                shell_thickness=shell_thickness,
+                chamfer=chamfer,
+                safety=safety,
+            )
         except Exception:
             stats.degenerate += 1
             continue

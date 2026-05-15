@@ -177,6 +177,15 @@ pathological case) actually bother in practice.
 - ✅ **In-memory correctness**: the boolean result is watertight on the
   sphere too. The Phase 1 prism puts each chamfer ring on the *actual*
   surface, so the bevel is uniform around every hole.
+- ✅ **Non-chamfer path is now also surface-aware**: the original
+  non-chamfer prism extruded along the seed's normal with linear
+  curvature taper, so on a sphere the prism cut the surface at shallow
+  angles in some directions and missed parts of the cell's true extent
+  on the curved surface. The new code routes both chamfer=0 and
+  chamfer>0 through the same surface-aware prism builder (with a 4-ring
+  tube for chamfer=0). Sphere non-chamfer volume went 15314 → 9365 —
+  holes are now properly tangent to the surface and span the cell's
+  full angular footprint.
 - ✅ **No more shell islands inside holes**: an earlier draft anchored the
   cap centroid at `mean(cap_top_ring)`, which on a sphere with wide-angular
   cells fell *inside* the sphere (average of points on a sphere is
