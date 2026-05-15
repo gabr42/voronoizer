@@ -52,6 +52,7 @@ def run(
     repair: bool,
     edge_margin: float | None = None,
     chamfer: float = 0.0,
+    soft_edge_angle_deg: float = 25.0,
 ) -> None:
     t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
@@ -71,6 +72,7 @@ def run(
             rng=rng,
             strut_thickness=strut_thickness,
             edge_margin=edge_margin,
+            sharp_edge_angle_deg=soft_edge_angle_deg,
         )
 
     # Mesh to use for edge analysis: the same one sample_seeds drew from

@@ -59,6 +59,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Chamfer distance (mm) for hole edges where they meet the shell "
              "surfaces. 0 = no chamfer (default). Clamped to safe maximum.",
     )
+    p.add_argument(
+        "--soft-edge-angle",
+        type=float, default=25.0,
+        help="Dihedral angle (deg) above which mesh edges count as 'sharp' "
+             "for seed-rejection. Default 25 deg works for boxy / faceted "
+             "models with crisp edges. Lower it (e.g. 10) for CAD-like "
+             "models with smooth fillets where holes near the fillets would "
+             "otherwise look chewed up.",
+    )
 
     p.add_argument(
         "--seed",
@@ -93,6 +102,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("error: --normal-angle must be in (0, 90)")
     if args.chamfer < 0:
         raise SystemExit("error: --chamfer must be >= 0")
+    if not (0.0 < args.soft_edge_angle < 180.0):
+        raise SystemExit("error: --soft-edge-angle must be in (0, 180)")
     if not args.input.exists():
         raise SystemExit(f"error: input file not found: {args.input}")
 
@@ -126,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             repair=args.repair,
             edge_margin=args.edge_margin,
             chamfer=args.chamfer,
+            soft_edge_angle_deg=args.soft_edge_angle,
         )
     except Exception as e:
         if args.verbose:

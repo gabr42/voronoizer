@@ -56,20 +56,21 @@ def _boundary_edges(mesh: trimesh.Trimesh) -> np.ndarray:
 
 
 def _sample_sharp_edge_points(
-    mesh: trimesh.Trimesh, step: float
+    mesh: trimesh.Trimesh, step: float, sharp_edge_angle_deg: float
 ) -> np.ndarray:
     """Return dense points along mesh edges that seeds should keep clear of.
 
     Two kinds count as "sharp":
-      - internal edges with a large dihedral angle (cube corners, cap rims of
-        a closed cylinder, etc.);
+      - internal edges with dihedral angle above `sharp_edge_angle_deg`
+        (cube corners at 90°, or smoothly-filleted "soft" edges if the
+        threshold is lowered);
       - open-boundary edges, i.e. edges used by exactly one face (these appear
         on a submesh, like the perimeter of a top/bottom-only filter).
     """
     edge_pairs: list[np.ndarray] = []
 
     if mesh.face_adjacency_angles is not None and len(mesh.face_adjacency_angles) > 0:
-        sharp = mesh.face_adjacency_angles > math.radians(_SHARP_EDGE_ANGLE_DEG)
+        sharp = mesh.face_adjacency_angles > math.radians(sharp_edge_angle_deg)
         if sharp.any():
             edge_pairs.append(mesh.face_adjacency_edges[sharp])
 
@@ -112,9 +113,13 @@ def sample_seeds(
     rng: np.random.Generator,
     strut_thickness: float,
     edge_margin: float | None = None,
+    sharp_edge_angle_deg: float = _SHARP_EDGE_ANGLE_DEG,
 ) -> Seeds:
     """Sample ~`count` Poisson-disk seeds on the surface, keeping them clear of
-    sharp mesh edges. `edge_margin` autosizes from seed density if None."""
+    sharp mesh edges. `edge_margin` autosizes from seed density if None.
+    `sharp_edge_angle_deg` controls which dihedrals count as "sharp" and get
+    edge-rejected — lower it to push seeds away from smooth fillet curves on
+    a CAD-like model whose corners aren't truly sharp."""
     src = mesh
     if top_bottom_only:
         mask = _top_bottom_face_mask(mesh, angle_deg)
@@ -132,7 +137,9 @@ def sample_seeds(
     progress.log(f"edge margin: {edge_margin:.2f} mm")
 
     edge_step = max(0.1, edge_margin * _EDGE_SAMPLE_STEP_FACTOR)
-    edge_pts = _sample_sharp_edge_points(src, step=edge_step)
+    edge_pts = _sample_sharp_edge_points(
+        src, step=edge_step, sharp_edge_angle_deg=sharp_edge_angle_deg
+    )
     edge_tree = cKDTree(edge_pts) if len(edge_pts) > 0 else None
     if edge_tree is None:
         progress.log("no sharp edges detected; skipping edge rejection")

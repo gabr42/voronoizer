@@ -84,6 +84,7 @@ and re-running with `--seed 1734528` reproduces the same pattern.
 | `--top-bottom-only` | off | Perforate only roughly horizontal faces — useful for cylinders, vases, etc. where you want the side walls intact. |
 | `--normal-angle DEG` | 30 | With `--top-bottom-only`, the maximum angle from ±Z a face can have and still count as "top/bottom". |
 | `--edge-margin MM` | auto | Minimum distance seeds must keep from sharp mesh edges or open boundaries. Default is auto-scaled from seed density. |
+| `--soft-edge-angle DEG` | 25 | Dihedral angle above which a mesh edge counts as "sharp" for the seed-rejection logic. The default works for boxy / faceted models with crisp edges. Lower it (e.g. 10) for CAD-like models with smooth filleted edges where holes near the fillets would otherwise look chewed up. |
 | `--chamfer MM` | 0.0 | Bevel the hole edges where they meet the shell surfaces. Works well on flat faces (cube, cylinder caps); on highly curved surfaces (spheres) the bevel is only visible near the centre of each hole — see *Limitations* below. Clamped to `min(0.49·strut, 0.49·shell)`. |
 | `--seed N` | random | Random seed for reproducible hole layouts. The seed actually used is always printed to stderr. |
 | `--repair` | off | Best-effort repair of non-manifold or non-watertight input meshes. |
