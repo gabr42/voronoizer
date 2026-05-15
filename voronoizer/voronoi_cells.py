@@ -313,13 +313,35 @@ def _build_prism_surface_aware(
     so cap-triangles dipping further inward there are harmless).
     """
     N = len(polygon_2d)
-    chamf_lat = chamfer * d_out  # (N, 3)
+
+    # On curved surfaces, lift the chamfered rings 0.05 mm into the air
+    # outside the shell along each polygon vertex's local normal. That
+    # displaces the *exact* chamfered polygon positions off the surface so
+    # manifold3d cuts the prism at the surface inside the chamfer
+    # transition rather than exactly at the chamfered position. Adjacent
+    # cells then don't share a coincident point on the surface and the
+    # twin-vertex slivers (~500 non-manifold edges per sphere STL) go away.
+    #
+    # To keep the visible chamfer width the same, the polygon expansion is
+    # widened by `lift` so the boolean's cross-section at altitude 0
+    # interpolates back to exactly `chamfer` mm. Bevel angle stays 45°.
+    #
+    # On flat surfaces (cube faces, cylinder caps) the lift is 0 — there
+    # are no near-tangencies to break, and the lift would only reduce the
+    # visible chamfer slightly.
+    if np.isfinite(R_local) and R_local > 0.0:
+        lift = 0.05
+        expansion = chamfer + lift
+    else:
+        lift = 0.0
+        expansion = chamfer
+    chamf_lat = expansion * d_out  # (N, 3)
 
     ring0 = P + chamf_lat + safety * n
-    ring1 = P + chamf_lat
+    ring1 = P + chamf_lat + lift * n
     ring2 = P - chamfer * n
     ring3 = P - (shell_thickness - chamfer) * n
-    ring4 = P - shell_thickness * n + chamf_lat
+    ring4 = P - shell_thickness * n + chamf_lat - lift * n
     ring5 = ring4 - safety * n
 
     if np.isfinite(R_local) and R_local > 0.0:

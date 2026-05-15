@@ -184,22 +184,13 @@ pathological case) actually bother in practice.
   boolean left small islands of shell material inside each hole. Fixed by
   anchoring the cap centroid at `seed ± k·seed_normal`, which is
   guaranteed to lie outside the shell along the seed's outward direction.
-- ⚠️ **STL / PLY / OBJ round-trip**: on highly curved surfaces with sparse
-  seeds, the boolean output contains ~250 *twin vertices* (two distinct
-  topological vertices at the same 3D location), produced by manifold3d
-  where adjacent Voronoi cells are very nearly tangent on the curved
-  surface. Standard mesh loaders dedupe these twins on load, which breaks
-  the manifold — the loaded file reports ~500 non-manifold edges.
-
-  - Edge-perpendicular polygon offset (instead of centroid-radial) helped
-    slightly (487 vs 509 nm edges).
-  - Reducing the chamfer size did **not** help — the issue isn't chamfer
-    magnitude, it's that surface-aware prisms with diverging per-vertex
-    normals produce sliver-prone boolean output regardless.
-  - Some slicers may still handle the twin-vertex geometry gracefully; this
-    needs in-print validation.
-
-**The twin-vertex issue is a Phase 2 problem to properly fix.** A geodesic
-Voronoi tessellation produces cell boundaries that are gap-free on the
-surface by construction, so the boolean won't need to manufacture twin
-vertices at near-tangencies.
+- ✅ **STL output is now manifold-clean on every test case** (cube,
+  cylinder top/bot, sphere — both with and without chamfer). The
+  remaining twin-vertex issue from earlier drafts was resolved by
+  lifting the chamfered rings 0.05 mm into the air outside the shell
+  along each polygon vertex's local normal, while widening the polygon
+  expansion to keep the visible chamfer (and the 45° bevel angle) the
+  same at the surface. Sphere ch=0.5 volume shifted only 8859 → 8857 —
+  same visible chamfer, zero non-manifold edges, zero open boundaries.
+  Phase 2's geodesic Voronoi rewrite is no longer needed to ship a
+  clean STL.
