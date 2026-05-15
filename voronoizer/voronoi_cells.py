@@ -288,6 +288,7 @@ def _build_prism_surface_aware(
     d_out: np.ndarray,
     seed: np.ndarray,
     seed_normal: np.ndarray,
+    R_local: float,
     shell_thickness: float,
     chamfer: float,
     safety: float,
@@ -299,13 +300,17 @@ def _build_prism_surface_aware(
     sit on the actual outer / inner shell surface and the bevel is visible
     at every part of the hole boundary, even on curved surfaces.
 
-    The cap centroids are anchored to `seed ± k·seed_normal` rather than the
-    mean of the ring's own vertices: on a curved surface the mean of points
-    spread over a wide angular cap can fall *inside* the sphere (the average
-    of points on a sphere is interior), turning the cap into a cone tip
-    pointing inward and leaving small islands of shell in the middle of the
-    hole. Anchoring at the seed keeps the cap centroid strictly outside the
-    shell.
+    The top cap centroid is pushed `R_local` mm along the seed's normal on
+    curved surfaces (else just `safety` mm on flat ones). A planar
+    cap-wheel triangle from a low centroid to a ring0 vertex on a sphere is
+    a *chord* across the outer surface — its midpoint lies *inside* the
+    sphere whenever the ring0 vertex is more than ~20° off the seed-axis,
+    and the chord cuts back through the shell. Putting the centroid at
+    `seed + R_local · seed_normal` guarantees every chord midpoint stays
+    outside the parallel sphere for polygon spreads up to 90°.
+
+    The bottom cap stays near the seed (inside the sphere is empty space,
+    so cap-triangles dipping further inward there are harmless).
     """
     N = len(polygon_2d)
     chamf_lat = chamfer * d_out  # (N, 3)
@@ -316,7 +321,12 @@ def _build_prism_surface_aware(
     ring3 = P - (shell_thickness - chamfer) * n
     ring4 = P - shell_thickness * n + chamf_lat
     ring5 = ring4 - safety * n
-    cap_top_centroid = seed + safety * seed_normal
+
+    if np.isfinite(R_local) and R_local > 0.0:
+        cap_top_height = max(safety, R_local)
+    else:
+        cap_top_height = safety
+    cap_top_centroid = seed + cap_top_height * seed_normal
     cap_bot_centroid = seed - (shell_thickness + safety) * seed_normal
     verts = np.vstack([ring0, ring1, ring2, ring3, ring4, ring5,
                        cap_top_centroid[None, :], cap_bot_centroid[None, :]])
@@ -569,6 +579,7 @@ def build_shrunken_cells(
                 prism = _build_prism_surface_aware(
                     smooth_poly, P_pv, n_pv, d_pv,
                     seed=seed, seed_normal=normal,
+                    R_local=R_local,
                     shell_thickness=shell_thickness,
                     chamfer=chamfer,
                     safety=safety,
