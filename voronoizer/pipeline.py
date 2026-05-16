@@ -18,6 +18,7 @@ from voronoizer.mirror_seeds import (
 from voronoizer.perforate import perforate
 from voronoizer.seeding import Seeds, sample_seeds
 from voronoizer.shell import build_shell
+from voronoizer.surface_pipeline import build_geodesic_cells
 from voronoizer.voronoi_cells import build_shrunken_cells
 
 
@@ -90,6 +91,8 @@ def run(
     soft_edge_angle_deg: float = 25.0,
     shell_only: bool = False,
     cutters_only: bool = False,
+    engine: str = "geodesic",
+    target_edge_length: float | None = None,
 ) -> None:
     t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
@@ -106,6 +109,12 @@ def run(
         progress.log(f"done in {time.perf_counter() - t0:.2f}s")
         return
 
+    # Sharp-edge rejection: needed for the tangent engine; the geodesic
+    # engine handles edges naturally, so we disable rejection there to keep
+    # seeds reachable across smooth fillets and round-overs.
+    seed_sharp_angle_deg = (
+        soft_edge_angle_deg if engine == "tangent" else 179.0
+    )
     with progress.step("sample seed points"):
         seeds = sample_seeds(
             mesh=mesh,
@@ -115,7 +124,7 @@ def run(
             rng=rng,
             strut_thickness=strut_thickness,
             edge_margin=edge_margin,
-            sharp_edge_angle_deg=soft_edge_angle_deg,
+            sharp_edge_angle_deg=seed_sharp_angle_deg,
         )
 
     # Mesh to use for edge analysis: the same one sample_seeds drew from
@@ -127,35 +136,52 @@ def run(
         if mask.any():
             edge_source = mesh.submesh([np.where(mask)[0]], append=True)
 
-    with progress.step("compute twin / mirror seeds"):
-        neighbor_dist = _auto_edge_neighbor_dist(
-            float(edge_source.area), len(seeds), strut_thickness
-        )
-        twins = compute_sharp_edge_twins(
-            mesh=edge_source,
-            seed_points=seeds.points,
-            seed_normals=seeds.normals,
-            max_twin_dist=neighbor_dist,
-        )
-        seeds = _merge_seeds(seeds, twins.points, twins.normals)
-        mirrors = compute_boundary_mirrors(
-            mesh=edge_source,
-            seed_points=seeds.points,
-            seed_normals=seeds.normals,
-            max_mirror_dist=neighbor_dist,
-        )
-        progress.log(
-            f"total real seeds: {len(seeds)} (original {len(seeds) - len(twins)} + twins {len(twins)})"
-        )
+    if engine == "tangent":
+        with progress.step("compute twin / mirror seeds"):
+            neighbor_dist = _auto_edge_neighbor_dist(
+                float(edge_source.area), len(seeds), strut_thickness
+            )
+            twins = compute_sharp_edge_twins(
+                mesh=edge_source,
+                seed_points=seeds.points,
+                seed_normals=seeds.normals,
+                max_twin_dist=neighbor_dist,
+            )
+            seeds = _merge_seeds(seeds, twins.points, twins.normals)
+            mirrors = compute_boundary_mirrors(
+                mesh=edge_source,
+                seed_points=seeds.points,
+                seed_normals=seeds.normals,
+                max_mirror_dist=neighbor_dist,
+            )
+            progress.log(
+                f"total real seeds: {len(seeds)} "
+                f"(original {len(seeds) - len(twins)} + twins {len(twins)})"
+            )
 
-    with progress.step("build & smooth cells"):
-        cells, _stats = build_shrunken_cells(
-            seeds=seeds,
-            mesh=edge_source,
-            shell_thickness=shell_thickness,
-            strut_thickness=strut_thickness,
-            mirror_seeds=mirrors,
-            chamfer=chamfer,
+        with progress.step("build & smooth cells (tangent engine)"):
+            cells, _stats = build_shrunken_cells(
+                seeds=seeds,
+                mesh=edge_source,
+                shell_thickness=shell_thickness,
+                strut_thickness=strut_thickness,
+                mirror_seeds=mirrors,
+                chamfer=chamfer,
+            )
+    elif engine == "geodesic":
+        with progress.step("build cells (geodesic engine)"):
+            cells, _stats = build_geodesic_cells(
+                seeds=seeds,
+                mesh=edge_source,
+                shell_thickness=shell_thickness,
+                strut_thickness=strut_thickness,
+                chamfer=chamfer,
+                target_edge_length=target_edge_length,
+            )
+    else:
+        raise ValueError(
+            f"pipeline.run: unknown engine '{engine}' "
+            f"(expected 'geodesic' or 'tangent')"
         )
 
     if cutters_only:

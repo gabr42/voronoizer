@@ -62,11 +62,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--soft-edge-angle",
         type=float, default=25.0,
-        help="Dihedral angle (deg) above which mesh edges count as 'sharp' "
-             "for seed-rejection. Default 25 deg works for boxy / faceted "
-             "models with crisp edges. Lower it (e.g. 10) for CAD-like "
-             "models with smooth fillets where holes near the fillets would "
-             "otherwise look chewed up.",
+        help="Tangent engine only: dihedral angle (deg) above which mesh "
+             "edges count as 'sharp' for seed-rejection. Default 25 deg "
+             "works for boxy / faceted models with crisp edges. Lower it "
+             "(e.g. 10) for CAD-like models with smooth fillets. Silently "
+             "ignored under --engine geodesic (geodesic Voronoi handles "
+             "edges naturally).",
+    )
+    p.add_argument(
+        "--engine",
+        choices=("geodesic", "tangent"),
+        default="geodesic",
+        help="Voronoi tessellation engine. geodesic (default): cell "
+             "boundaries follow the actual mesh surface; robust on CAD "
+             "models with fillets and on low-poly inputs. tangent: "
+             "Phase 1 tangent-plane Voronoi, kept for regression and "
+             "special cases.",
+    )
+    p.add_argument(
+        "--target-edge-length",
+        type=float, default=None,
+        help="Geodesic engine only: subdivide the input mesh until all "
+             "edges are at most this long (mm). Default: strut/2. Lower "
+             "values give finer boundaries but cost faces (capped at 500k).",
     )
 
     p.add_argument(
@@ -122,6 +140,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("error: --chamfer must be >= 0")
     if not (0.0 < args.soft_edge_angle < 180.0):
         raise SystemExit("error: --soft-edge-angle must be in (0, 180)")
+    if args.target_edge_length is not None and args.target_edge_length <= 0:
+        raise SystemExit("error: --target-edge-length must be > 0")
     if not args.input.exists():
         raise SystemExit(f"error: input file not found: {args.input}")
 
@@ -158,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
             soft_edge_angle_deg=args.soft_edge_angle,
             shell_only=args.shell,
             cutters_only=args.cutters,
+            engine=args.engine,
+            target_edge_length=args.target_edge_length,
         )
     except Exception as e:
         if args.verbose:

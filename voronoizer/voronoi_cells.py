@@ -292,6 +292,7 @@ def _build_prism_surface_aware(
     shell_thickness: float,
     chamfer: float,
     safety: float,
+    force_lift: bool = False,
 ) -> trimesh.Trimesh:
     """Phase-1 surface-aware prism cutter.
 
@@ -326,6 +327,13 @@ def _build_prism_surface_aware(
     """
     N = len(polygon_2d)
     curved = np.isfinite(R_local) and R_local > 0.0
+    # `force_lift` is the Phase-2 path: geodesic boundary loops routinely
+    # span sharp surface edges (cube corners, etc.), where two adjacent
+    # ring-1 vertices sit on different faces. The wall between them passes
+    # exactly along the cube's corner edge — manifold3d sees that as a
+    # near-coincidence with the shell's own edge and emits twin vertices.
+    # Lifting the outer/inner rings by 0.05 mm breaks the coincidence.
+    apply_lift = curved or force_lift
 
     if chamfer > 0.0:
         # Lift the chamfered rings 0.05 mm off the surface so manifold3d
@@ -334,7 +342,7 @@ def _build_prism_surface_aware(
         # visible chamfer width the same. Flat surfaces skip the lift —
         # they have no near-tangencies to break, and the lift would only
         # reduce the visible chamfer.
-        lift = 0.05 if curved else 0.0
+        lift = 0.05 if apply_lift else 0.0
         expansion = chamfer + lift
         chamf_lat = expansion * d_out  # (N, 3)
         ring_pos = [
@@ -352,7 +360,7 @@ def _build_prism_surface_aware(
         # otherwise sees them as near-tangent at the surface, producing
         # twin-vertex slivers. The lateral position is the same on both
         # sides of the lift, so the visible hole shape is unchanged.
-        lift = 0.05 if curved else 0.0
+        lift = 0.05 if apply_lift else 0.0
         ring_pos = [
             P + safety * n,                                      # 0: cap top
             P + lift * n,                                        # 1: outer surface
