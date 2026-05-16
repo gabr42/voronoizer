@@ -79,6 +79,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Best-effort repair of non-manifold / non-watertight input.",
     )
+
+    diag = p.add_argument_group(
+        "Diagnostic / inspection modes (mutually exclusive)"
+    )
+    diag_mx = diag.add_mutually_exclusive_group()
+    diag_mx.add_argument(
+        "--shell",
+        action="store_true",
+        help="Stop after building the hollow shell and write it to the output. "
+             "No seeds, no Voronoi cells, no perforation.",
+    )
+    diag_mx.add_argument(
+        "--cutters",
+        action="store_true",
+        help="Build the shell and compute the Voronoi cell cutters, then write "
+             "the concatenated cutters to the output (instead of the "
+             "perforated shell). Useful for inspecting hole geometry.",
+    )
     p.add_argument(
         "-v", "--verbose",
         action="store_true",
@@ -138,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
             edge_margin=args.edge_margin,
             chamfer=args.chamfer,
             soft_edge_angle_deg=args.soft_edge_angle,
+            shell_only=args.shell,
+            cutters_only=args.cutters,
         )
     except Exception as e:
         if args.verbose:

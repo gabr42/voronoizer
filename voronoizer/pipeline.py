@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import trimesh
 
 from voronoizer import progress
 from voronoizer.meshio import load_stl, save_stl
@@ -53,6 +54,8 @@ def run(
     edge_margin: float | None = None,
     chamfer: float = 0.0,
     soft_edge_angle_deg: float = 25.0,
+    shell_only: bool = False,
+    cutters_only: bool = False,
 ) -> None:
     t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
@@ -62,6 +65,12 @@ def run(
 
     with progress.step("build hollow shell"):
         shell = build_shell(mesh, shell_thickness)
+
+    if shell_only:
+        with progress.step("write STL"):
+            save_stl(shell, output_path)
+        progress.log(f"done in {time.perf_counter() - t0:.2f}s")
+        return
 
     with progress.step("sample seed points"):
         seeds = sample_seeds(
@@ -114,6 +123,16 @@ def run(
             mirror_seeds=mirrors,
             chamfer=chamfer,
         )
+
+    if cutters_only:
+        with progress.step("concatenate cutters"):
+            if not cells:
+                raise RuntimeError("no cutters to export")
+            cutters_mesh = trimesh.util.concatenate(cells)
+        with progress.step("write STL"):
+            save_stl(cutters_mesh, output_path)
+        progress.log(f"done in {time.perf_counter() - t0:.2f}s")
+        return
 
     with progress.step("perforate shell"):
         perforated = perforate(shell, cells)

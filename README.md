@@ -91,6 +91,16 @@ and re-running with `--seed 1734528` reproduces the same pattern.
 | `-v, --verbose` | off | Progress bars and per-step timing. |
 | `--version` | — | Print version and exit. |
 
+#### Diagnostic / inspection modes
+
+These two flags stop the pipeline early and write an intermediate result
+instead of the perforated shell. Mutually exclusive.
+
+| Flag | Effect |
+|---|---|
+| `--shell` | Build the hollow shell and write *just the shell* to the output. No seeds, no Voronoi cells, no perforation. Useful for previewing what the shell construction produced. |
+| `--cutters` | Build the shell and compute the Voronoi cell cutters, then write the *concatenated cutters* to the output instead of the perforated shell. Useful for inspecting hole geometry (each cell is a separate body in the resulting mesh). |
+
 ### Examples
 
 A standard perforated cube:
