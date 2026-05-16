@@ -99,7 +99,7 @@ instead of the perforated shell. Mutually exclusive.
 | Flag | Effect |
 |---|---|
 | `--shell` | Build the hollow shell and write *just the shell* to the output. No seeds, no Voronoi cells, no perforation. Useful for previewing what the shell construction produced. |
-| `--cutters` | Build the shell and compute the Voronoi cell cutters, then write the *concatenated cutters* to the output instead of the perforated shell. Useful for inspecting hole geometry (each cell is a separate body in the resulting mesh). |
+| `--cutters` | Build the shell and compute the Voronoi cell cutters, then write the *concatenated cutters* to the output instead of the perforated shell. Each cutter is clipped to the model's bounding box (plus a small margin) so cells whose Voronoi polygon happens to extend far past the model don't clutter the inspection view. Each cell remains a separate body in the resulting mesh. |
 
 ### Examples
 

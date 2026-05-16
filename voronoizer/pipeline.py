@@ -41,6 +41,40 @@ def _merge_seeds(a: Seeds, b_points: np.ndarray, b_normals: np.ndarray) -> Seeds
     )
 
 
+def _clip_cutters_to_bbox(
+    cutters: list[trimesh.Trimesh],
+    bounds: np.ndarray,
+    margin: float,
+) -> list[trimesh.Trimesh]:
+    """Intersect each cutter with an axis-aligned box around the input
+    model (expanded by `margin` on each side). Voronoi cells whose seeds
+    sit near sparse-neighbour regions can have polygons that extend far
+    past the model in one direction; the resulting cutter is still
+    correct (the boolean clips it at the shell anyway) but ugly to look
+    at when exported via --cutters. Clipping each cutter to roughly the
+    model's bounding box gives a cleaner inspection mesh.
+    """
+    lo = np.asarray(bounds[0], dtype=float) - margin
+    hi = np.asarray(bounds[1], dtype=float) + margin
+    center = (lo + hi) / 2.0
+    extents = hi - lo
+    transform = np.eye(4)
+    transform[:3, 3] = center
+    box = trimesh.creation.box(extents=extents, transform=transform)
+
+    clipped: list[trimesh.Trimesh] = []
+    for cutter in cutters:
+        try:
+            r = trimesh.boolean.intersection([cutter, box], engine="manifold")
+            if isinstance(r, trimesh.Trimesh) and len(r.faces) > 0:
+                clipped.append(r)
+            else:
+                clipped.append(cutter)
+        except Exception:
+            clipped.append(cutter)
+    return clipped
+
+
 def run(
     input_path: Path,
     output_path: Path,
@@ -125,9 +159,13 @@ def run(
         )
 
     if cutters_only:
+        if not cells:
+            raise RuntimeError("no cutters to export")
+        with progress.step("clip cutters to model bounds"):
+            cells = _clip_cutters_to_bbox(
+                cells, mesh.bounds, margin=shell_thickness
+            )
         with progress.step("concatenate cutters"):
-            if not cells:
-                raise RuntimeError("no cutters to export")
             cutters_mesh = trimesh.util.concatenate(cells)
         with progress.step("write STL"):
             save_stl(cutters_mesh, output_path)
