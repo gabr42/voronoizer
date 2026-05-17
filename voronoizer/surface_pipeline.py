@@ -45,6 +45,7 @@ from voronoizer.seeding import Seeds
 from voronoizer.surface_boundary import (
     Loop,
     bezier_smooth_on_surface,
+    convexify_loop_in_tangent,
     dedupe_loop,
     extract_cell_loops,
     inset_loop_on_surface,
@@ -76,6 +77,7 @@ def build_geodesic_cells(
     chamfer: float,
     target_edge_length: float | None = None,
     resample_step: float | None = None,
+    sharp_angle_deg: float = 25.0,
 ) -> tuple[list[trimesh.Trimesh], GeodesicCellStats]:
     """Build prism cutters for each seed using the geodesic engine."""
     # Stage 1 — subdivide. Default target = strut/2: edge length 50 % of the
@@ -90,9 +92,15 @@ def build_geodesic_cells(
     ):
         sub_mesh = subdivide_for_geodesic(mesh, target_edge_length)
 
-    # Stage 2 — Dijkstra.
+    # Stage 2 — Dijkstra with sharp-edge barriers (Approach A). Edges whose
+    # dihedral angle exceeds `sharp_angle_deg` get a high cost multiplier
+    # so Voronoi cells stay within smooth patches (one cube face, one
+    # filleted segment) rather than wrapping across corners — which would
+    # produce skewed prisms manifold3d can't subtract cleanly.
     with progress.step(f"geodesic: Dijkstra on {len(sub_mesh.vertices)} vertices"):
-        labels = assign_cell_labels(sub_mesh, seeds.points)
+        labels = assign_cell_labels(
+            sub_mesh, seeds.points, sharp_angle_deg=sharp_angle_deg
+        )
         face_labels = face_labels_from_vertex_labels(sub_mesh, labels)
 
     # Stage 3 — extract closed boundary loops per cell.
@@ -138,7 +146,22 @@ def build_geodesic_cells(
             stats.too_few_vertices += 1
             continue
 
+        seed = seeds.points[s_idx]
+        seed_normal = seeds.normals[s_idx]
+
         loop = resample_loop_arclen(loop, sub_mesh, proximity, target_step=resample_step)
+        if len(loop) < 3:
+            stats.too_few_vertices += 1
+            continue
+        # Convex-hull in the seed's tangent plane: enforces the convex-hole
+        # look users expect from a Voronoi pattern. With sharp-edge barriers
+        # in Stage 2, each cell sits on a smooth patch where the tangent
+        # projection is faithful, so we lose almost no real geometry — just
+        # iron out the small concavities introduced by Dijkstra-on-discrete-
+        # edges and Bézier resampling.
+        loop = convexify_loop_in_tangent(
+            loop, seed, seed_normal, sub_mesh, proximity
+        )
         if len(loop) < 3:
             stats.too_few_vertices += 1
             continue
@@ -152,9 +175,6 @@ def build_geodesic_cells(
         if len(loop) < 3:
             stats.too_few_vertices += 1
             continue
-
-        seed = seeds.points[s_idx]
-        seed_normal = seeds.normals[s_idx]
 
         if seed_tree is None:
             R_local = float("inf")

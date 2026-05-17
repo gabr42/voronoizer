@@ -13,12 +13,25 @@ geodesic distance to it.
 from __future__ import annotations
 
 import heapq
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import trimesh
 
 from voronoizer import progress
+
+
+# Multiplier applied to mesh-edge weights that cross a "sharp" dihedral.
+# Needs to be large enough that the cheapest "go around" path on the
+# original face is preferred over crossing a sharp edge — for a 40 mm
+# cube with 0.75 mm subdivision, the maximum on-face geodesic between
+# two seeds is ~100 mm and one sharp-edge step is 0.75 mm, so the
+# multiplier must comfortably exceed 100 mm / 0.75 mm ≈ 130×. A
+# generous 10 000× makes the barrier effectively unbreachable for any
+# realistic mesh size while still leaving the graph connected (cells
+# *can* spill across a sharp edge if their face has no seed at all).
+_SHARP_EDGE_COST_MULT = 10000.0
 
 
 # Hard cap on the subdivided face count. Real prints stay well under this; the
@@ -114,113 +127,290 @@ def subdivide_for_geodesic(
 class GeodesicLabels:
     """Output of multi-source Dijkstra on the mesh edge graph.
 
-    `labels[v]` is the index of the seed (in the input seeds array) closest in
-    geodesic distance to mesh vertex `v`. `distances[v]` is that distance.
-    Unreachable vertices (disconnected components) get label == -1, distance ==
-    inf.
+    `face_labels[f]` is the index of the seed (in the input seeds array)
+    whose Voronoi cell claims face f. We label faces, not vertices: a
+    vertex on a sharp cube edge belongs to multiple smooth patches at once
+    and would need a different label per patch — face-level labelling
+    avoids the ambiguity (every face sits in exactly one patch).
+
+    `face_distances[f]` is the geodesic distance from face f's nearest
+    vertex to the claiming seed. Sharp-edge barriers prevent Dijkstra
+    paths from crossing patch boundaries except where there is no other
+    option (a patch with no seed in it).
     """
-    labels: np.ndarray     # (V,) int64
-    distances: np.ndarray  # (V,) float64
+    face_labels: np.ndarray     # (F,) int64
+    face_distances: np.ndarray  # (F,) float64
 
 
-def _build_vertex_adjacency(
-    mesh: trimesh.Trimesh,
-) -> list[list[tuple[int, float]]]:
-    """Per-vertex neighbour list: vertex -> [(neighbour, edge_length), ...]."""
-    edges = mesh.edges_unique
-    edge_lengths = np.linalg.norm(
-        mesh.vertices[edges[:, 0]] - mesh.vertices[edges[:, 1]], axis=1
+def _sharp_edge_keys(
+    mesh: trimesh.Trimesh, sharp_angle_deg: float
+) -> set[tuple[int, int]]:
+    """Set of `(min(v_a, v_b), max(v_a, v_b))` keys for mesh edges whose
+    dihedral angle exceeds the threshold.
+
+    `mesh.face_adjacency_angles` gives the angle at each internal edge; edges
+    on the open boundary (1-face edges) aren't sharp by definition (no
+    dihedral to compute).
+    """
+    if sharp_angle_deg >= 179.5:
+        return set()
+    angles = mesh.face_adjacency_angles
+    if len(angles) == 0:
+        return set()
+    sharp = angles > math.radians(sharp_angle_deg)
+    if not sharp.any():
+        return set()
+    sharp_edges = mesh.face_adjacency_edges[sharp]
+    return {
+        (int(min(a, b)), int(max(a, b)))
+        for a, b in sharp_edges
+    }
+
+
+def _face_components(
+    mesh: trimesh.Trimesh, sharp_angle_deg: float
+) -> np.ndarray:
+    """Partition mesh faces into "patches" — connected components when
+    sharp-edge face-adjacencies are removed.
+
+    Returns shape (NF,) int array where `comp[f]` is the patch id of face f.
+    On a 40 mm cube with default threshold this gives 6 patches (one per
+    cube face). On a sphere / fillet (no sharp edges) this gives 1 patch.
+
+    Implemented as a union-find over face-adjacency pairs whose dihedral
+    angle is below the threshold.
+    """
+    NF = len(mesh.faces)
+    if NF == 0:
+        return np.zeros(0, dtype=np.int64)
+    parent = np.arange(NF, dtype=np.int64)
+
+    def find(x: int) -> int:
+        # Iterative path compression.
+        root = x
+        while parent[root] != root:
+            root = int(parent[root])
+        while parent[x] != root:
+            parent[x], x = root, int(parent[x])
+        return root
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    fa = mesh.face_adjacency
+    angles = mesh.face_adjacency_angles
+    if len(fa) > 0:
+        thr = math.radians(sharp_angle_deg) if sharp_angle_deg < 179.5 else math.pi
+        smooth_mask = angles <= thr
+        for (i, j) in fa[smooth_mask]:
+            union(int(i), int(j))
+
+    # Compress and re-label to contiguous component ids.
+    roots = np.array([find(f) for f in range(NF)], dtype=np.int64)
+    _, comp = np.unique(roots, return_inverse=True)
+    return comp.astype(np.int64)
+
+
+def _build_component_adjacency(
+    mesh: trimesh.Trimesh, face_components: np.ndarray, comp_id: int
+) -> dict[int, list[tuple[int, float]]]:
+    """Per-vertex neighbour list restricted to faces in `comp_id`.
+
+    Only mesh edges whose BOTH adjacent faces are in component `comp_id`
+    are included. Edges on the patch boundary (one face in, one face out)
+    are NOT included — that's the barrier: paths can't leave the patch.
+    Open boundary edges (one adjacent face) are included if that face is
+    in the patch.
+    """
+    F = mesh.faces
+    NF = len(F)
+    edge_lengths = {}  # (a, b) sorted -> length; computed lazily
+    adj: dict[int, list[tuple[int, float]]] = {}
+
+    def add(v_a: int, v_b: int, length: float) -> None:
+        adj.setdefault(v_a, []).append((v_b, length))
+        adj.setdefault(v_b, []).append((v_a, length))
+
+    # Walk each face once; for each of its 3 edges, add the edge to `adj`
+    # only if the other face across the edge is also in `comp_id` (or the
+    # edge is on the open boundary). Mesh.face_adjacency gives the pairs
+    # of internal-edge faces; complement set gives boundary edges.
+    fa = mesh.face_adjacency
+    fa_edges = mesh.face_adjacency_edges
+    seen: set[tuple[int, int]] = set()
+    for (f0, f1), (va, vb) in zip(fa, fa_edges):
+        c0 = int(face_components[f0])
+        c1 = int(face_components[f1])
+        if c0 != comp_id and c1 != comp_id:
+            continue
+        if c0 != c1:
+            # Cross-patch edge — that's the barrier; skip.
+            continue
+        a_i = int(va); b_i = int(vb)
+        key = (min(a_i, b_i), max(a_i, b_i))
+        if key in seen:
+            continue
+        seen.add(key)
+        L = float(np.linalg.norm(mesh.vertices[a_i] - mesh.vertices[b_i]))
+        add(a_i, b_i, L)
+
+    # Open-boundary edges (faces used by exactly one triangle): include
+    # if that triangle is in comp_id.
+    edges = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+    face_per_edge = np.repeat(np.arange(NF), 3)
+    edges_sorted = np.sort(edges, axis=1)
+    unique, inv, counts = np.unique(
+        edges_sorted, axis=0, return_inverse=True, return_counts=True
     )
-    adj: list[list[tuple[int, float]]] = [[] for _ in range(len(mesh.vertices))]
-    for (a, b), L in zip(edges, edge_lengths):
-        a_i = int(a); b_i = int(b); L_f = float(L)
-        adj[a_i].append((b_i, L_f))
-        adj[b_i].append((a_i, L_f))
+    boundary_unique_idx = np.where(counts == 1)[0]
+    for u_idx in boundary_unique_idx:
+        # Find the one face using this edge.
+        first = int(np.where(inv == u_idx)[0][0])
+        f = int(face_per_edge[first])
+        if int(face_components[f]) != comp_id:
+            continue
+        a_i, b_i = int(unique[u_idx, 0]), int(unique[u_idx, 1])
+        key = (min(a_i, b_i), max(a_i, b_i))
+        if key in seen:
+            continue
+        seen.add(key)
+        L = float(np.linalg.norm(mesh.vertices[a_i] - mesh.vertices[b_i]))
+        add(a_i, b_i, L)
+
     return adj
+
+
+def _faces_in_component(
+    face_components: np.ndarray, comp_id: int
+) -> np.ndarray:
+    return np.where(face_components == comp_id)[0]
+
+
+def _vertices_in_component(
+    mesh: trimesh.Trimesh, face_components: np.ndarray, comp_id: int
+) -> np.ndarray:
+    faces_idx = _faces_in_component(face_components, comp_id)
+    return np.unique(mesh.faces[faces_idx].ravel())
 
 
 def assign_cell_labels(
     mesh: trimesh.Trimesh,
     seed_points: np.ndarray,
+    sharp_angle_deg: float = 25.0,
+    sharp_multiplier: float = _SHARP_EDGE_COST_MULT,
 ) -> GeodesicLabels:
-    """Multi-source Dijkstra labelling of mesh vertices.
+    """Per-face Voronoi labelling via component-restricted Dijkstra.
 
-    For each mesh vertex, find the index of the geodesically-closest seed
-    and the distance to it. Each seed is treated as a virtual source vertex
-    connected to the 3 vertices of the face it sits on; from there, edge
-    relaxation uses Euclidean edge lengths.
+    The mesh is partitioned into smooth patches by `_face_components` —
+    each patch is a maximal set of faces connected through dihedral angles
+    ≤ `sharp_angle_deg`. For every patch we run multi-source Dijkstra
+    over only the patch's faces, with seeds whose closest mesh face is in
+    that patch as the sources. Faces in patches that contain no seed get
+    a fallback label from the spatially-closest seed (Euclidean), so the
+    labelling stays defined everywhere.
 
-    This approximates true geodesic distance from above (path is constrained
-    to mesh edges). After Stage 1 subdivision the approximation is fine for
-    boundary extraction — the boundary is then smoothed in Stage 4.
+    The `sharp_multiplier` argument is accepted for API stability; with
+    the component-restricted graph the barrier is implicit (cross-patch
+    edges are simply absent from the adjacency), so the multiplier is
+    unused.
     """
+    _ = sharp_multiplier  # kept for API stability
     if len(seed_points) == 0:
         raise ValueError(
             "surface_voronoi.assign_cell_labels: no seeds supplied"
         )
-    V = len(mesh.vertices)
+    NF = len(mesh.faces)
+    seed_points = np.asarray(seed_points, dtype=float)
     N_seeds = len(seed_points)
 
-    adj = _build_vertex_adjacency(mesh)
+    face_components = _face_components(mesh, sharp_angle_deg)
+    n_comp = int(face_components.max()) + 1 if len(face_components) else 0
+    progress.log(
+        f"geodesic: mesh partitions into {n_comp} smooth patch(es) "
+        f"at sharp-edge threshold {sharp_angle_deg:.1f}°"
+    )
 
-    # Snap each seed onto the mesh and record which face it landed on.
+    # Snap each seed onto the mesh; record landing face and patch.
     from trimesh.proximity import ProximityQuery
     pq = ProximityQuery(mesh)
-    closest, _dist, face_ids = pq.on_surface(np.asarray(seed_points, dtype=float))
-    face_ids = np.asarray(face_ids, dtype=int)
+    closest, _dist, seed_face_ids = pq.on_surface(seed_points)
+    seed_face_ids = np.asarray(seed_face_ids, dtype=int)
     closest = np.asarray(closest, dtype=float)
-    faces = mesh.faces
+    seed_comp = face_components[seed_face_ids]
 
     INF = float("inf")
-    labels = np.full(V, -1, dtype=np.int64)
-    distances = np.full(V, INF, dtype=np.float64)
+    face_labels = np.full(NF, -1, dtype=np.int64)
+    face_distances = np.full(NF, INF, dtype=np.float64)
 
-    # Heap entries: (distance, vertex_idx, seed_idx). When a vertex is popped
-    # with a strictly smaller distance than already recorded, it inherits the
-    # popping seed's label; stale entries with larger distance are skipped.
-    heap: list[tuple[float, int, int]] = []
+    seeds_by_comp: dict[int, list[int]] = {}
     for s_idx in range(N_seeds):
-        f = int(face_ids[s_idx])
-        cp = closest[s_idx]
-        for v_idx in faces[f]:
-            v_i = int(v_idx)
-            d0 = float(np.linalg.norm(mesh.vertices[v_i] - cp))
-            heapq.heappush(heap, (d0, v_i, s_idx))
+        seeds_by_comp.setdefault(int(seed_comp[s_idx]), []).append(s_idx)
 
-    while heap:
-        d, v, s = heapq.heappop(heap)
-        if d >= distances[v]:
+    for comp_id in range(n_comp):
+        comp_seeds = seeds_by_comp.get(comp_id, [])
+        if not comp_seeds:
             continue
-        distances[v] = d
-        labels[v] = s
-        for nb, L in adj[v]:
-            nd = d + L
-            if nd < distances[nb]:
-                heapq.heappush(heap, (nd, nb, s))
+        # Restricted adjacency: only edges within this patch.
+        adj = _build_component_adjacency(mesh, face_components, comp_id)
+        # Per-vertex (label, distance) for vertices reachable in this patch.
+        v_dist: dict[int, float] = {}
+        v_label: dict[int, int] = {}
+        heap: list[tuple[float, int, int]] = []
+        for s_idx in comp_seeds:
+            f = int(seed_face_ids[s_idx])
+            cp = closest[s_idx]
+            for v_idx in mesh.faces[f]:
+                v_i = int(v_idx)
+                d0 = float(np.linalg.norm(mesh.vertices[v_i] - cp))
+                heapq.heappush(heap, (d0, v_i, s_idx))
+        while heap:
+            d, v, s = heapq.heappop(heap)
+            if v in v_dist and d >= v_dist[v]:
+                continue
+            v_dist[v] = d
+            v_label[v] = s
+            for nb, L in adj.get(v, ()):
+                nd = d + L
+                if nb not in v_dist or nd < v_dist[nb]:
+                    heapq.heappush(heap, (nd, nb, s))
+        # Project to face labels for faces in this patch.
+        comp_faces = _faces_in_component(face_components, comp_id)
+        for f in comp_faces:
+            fv = mesh.faces[f]
+            best_d = INF; best_l = -1
+            for v_i in fv:
+                v_i = int(v_i)
+                if v_i in v_dist and v_dist[v_i] < best_d:
+                    best_d = v_dist[v_i]
+                    best_l = v_label[v_i]
+            face_labels[f] = best_l
+            face_distances[f] = best_d
 
-    unreached = int((labels < 0).sum())
-    if unreached:
+    # Fallback for patches with no seed: assign each unlabeled face to the
+    # spatially nearest seed (Euclidean distance from face centroid).
+    unl = face_labels < 0
+    if unl.any():
+        from scipy.spatial import cKDTree
+        tree = cKDTree(seed_points)
+        centroids = mesh.vertices[mesh.faces[unl]].mean(axis=1)
+        _, idx = tree.query(centroids)
+        face_labels[unl] = idx.astype(np.int64)
+        # Distances are left INF for these — they're not strictly geodesic.
         progress.warn(
-            f"geodesic: {unreached} mesh vertices unreachable from any seed "
-            f"(disconnected component?)"
+            f"geodesic: {int(unl.sum())} faces in patches without any seed "
+            f"fell back to Euclidean nearest-seed assignment"
         )
 
-    return GeodesicLabels(labels=labels, distances=distances)
+    return GeodesicLabels(
+        face_labels=face_labels, face_distances=face_distances
+    )
 
 
 def face_labels_from_vertex_labels(
     mesh: trimesh.Trimesh, labels: GeodesicLabels
 ) -> np.ndarray:
-    """Project per-vertex labels onto per-face labels.
-
-    Each face is assigned the label of its vertex with the smallest geodesic
-    distance — i.e., the seed whose Voronoi cell most strongly "claims" the
-    face. This gives a clean per-face partition; the boundary lies on mesh
-    edges shared between faces with different labels.
-    """
-    faces = mesh.faces
-    vd = labels.distances[faces]            # (F, 3)
-    vl = labels.labels[faces]               # (F, 3)
-    nearest = np.argmin(vd, axis=1)         # (F,)
-    rows = np.arange(len(faces))
-    return vl[rows, nearest].astype(np.int64)
+    """Compatibility shim — labels are now per-face natively."""
+    _ = mesh  # unused; kept for call-site compatibility
+    return labels.face_labels

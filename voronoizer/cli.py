@@ -62,12 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--soft-edge-angle",
         type=float, default=25.0,
-        help="Tangent engine only: dihedral angle (deg) above which mesh "
-             "edges count as 'sharp' for seed-rejection. Default 25 deg "
-             "works for boxy / faceted models with crisp edges. Lower it "
-             "(e.g. 10) for CAD-like models with smooth fillets. Silently "
-             "ignored under --engine geodesic (geodesic Voronoi handles "
-             "edges naturally).",
+        help="Dihedral angle (deg) above which mesh edges count as 'sharp'. "
+             "Tangent engine: seeds within --edge-margin of a sharp edge "
+             "are rejected. Geodesic engine: sharp edges act as Dijkstra "
+             "barriers so Voronoi cells stay within smooth patches "
+             "(no hole wraps a cube corner). Default 25 deg works for "
+             "boxy / faceted models with crisp edges. Lower it (e.g. 10) "
+             "for CAD-like models with smooth fillets — that lets each "
+             "fillet count as a 'sharp' boundary and keeps holes cleanly "
+             "on the flat surfaces it separates.",
     )
     p.add_argument(
         "--engine",

@@ -19,6 +19,12 @@ from dataclasses import dataclass
 
 import numpy as np
 import trimesh
+from scipy.spatial import ConvexHull
+
+try:
+    from scipy.spatial import QhullError
+except ImportError:
+    from scipy.spatial.qhull import QhullError
 
 
 # Bézier smoothing matches Phase 1's tangent-frame smoothing.
@@ -262,6 +268,75 @@ def resample_loop_arclen(
         positions=snapped,
         face_ids=face_ids,
         normals=_smoothed_normals_at(mesh, snapped, face_ids),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Convex-hull projection in the seed's tangent plane.
+# ---------------------------------------------------------------------------
+
+
+def _tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Orthonormal (u, v) basis spanning the plane perpendicular to `normal`."""
+    n = normal / max(float(np.linalg.norm(normal)), 1e-12)
+    helper = (
+        np.array([1.0, 0.0, 0.0])
+        if abs(n[0]) < 0.9
+        else np.array([0.0, 1.0, 0.0])
+    )
+    u = np.cross(n, helper)
+    u = u / max(float(np.linalg.norm(u)), 1e-12)
+    v = np.cross(n, u)
+    return u, v
+
+
+def convexify_loop_in_tangent(
+    loop: Loop,
+    seed: np.ndarray,
+    seed_normal: np.ndarray,
+    mesh: trimesh.Trimesh,
+    proximity,
+) -> Loop:
+    """Project the loop into the seed's tangent plane, take its 2D convex
+    hull, then re-project the hull vertices back onto the surface.
+
+    Phase 1 produces convex holes by construction (each cell is a 2D
+    half-plane intersection in the seed's tangent frame). Phase 2's raw
+    geodesic boundary can be non-convex when projected to the same tangent
+    frame — discrete mesh edges, Dijkstra approximation, and Bézier sampling
+    all introduce small wobbles that read as visible concavities in the
+    final hole.
+
+    Forcing convexity in the tangent plane gives the look users expect from
+    a Voronoi pattern, with negligible loss of surface accuracy: cells stay
+    within their smooth patch (Approach A's sharp-edge barriers ensure this
+    on faceted inputs), so the tangent-plane projection is faithful.
+    """
+    if len(loop) < 4:
+        return loop
+    u, v = _tangent_basis(np.asarray(seed_normal, dtype=float))
+    seed3 = np.asarray(seed, dtype=float)
+    rel = loop.positions - seed3
+    pts2d = np.column_stack([rel @ u, rel @ v])
+    try:
+        hull = ConvexHull(pts2d)
+    except (QhullError, ValueError):
+        return loop
+    if len(hull.vertices) < 3:
+        return loop
+    # ConvexHull.vertices is CCW for 2D, which matches our loop convention
+    # (cell on the left of walking direction). Keep the original positions,
+    # face_ids and normals for the selected vertices — re-projecting via
+    # on_surface can flip face_ids at cube edges (the closest surface point
+    # of an edge-vertex is on whichever face wins the proximity tie), which
+    # would put the prism's per-vertex normal on the *neighbouring* face
+    # and pull the cell across the sharp dihedral the barriers were
+    # supposed to keep it away from.
+    keep = hull.vertices
+    return Loop(
+        positions=loop.positions[keep],
+        face_ids=loop.face_ids[keep],
+        normals=loop.normals[keep],
     )
 
 

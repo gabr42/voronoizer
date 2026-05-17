@@ -109,9 +109,11 @@ def run(
         progress.log(f"done in {time.perf_counter() - t0:.2f}s")
         return
 
-    # Sharp-edge rejection: needed for the tangent engine; the geodesic
-    # engine handles edges naturally, so we disable rejection there to keep
-    # seeds reachable across smooth fillets and round-overs.
+    # Sharp-edge handling differs by engine:
+    #   - tangent uses --soft-edge-angle to REJECT seeds near sharp edges.
+    #   - geodesic uses --soft-edge-angle as a Dijkstra COST BARRIER, so
+    #     cells naturally stay within smooth patches; seed rejection is
+    #     unnecessary and would just throw away usable seed locations.
     seed_sharp_angle_deg = (
         soft_edge_angle_deg if engine == "tangent" else 179.0
     )
@@ -177,6 +179,7 @@ def run(
                 strut_thickness=strut_thickness,
                 chamfer=chamfer,
                 target_edge_length=target_edge_length,
+                sharp_angle_deg=soft_edge_angle_deg,
             )
     else:
         raise ValueError(
