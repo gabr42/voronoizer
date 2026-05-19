@@ -47,11 +47,22 @@ def subdivide_for_geodesic(
 ) -> trimesh.Trimesh:
     """Return a copy of `mesh` whose every edge is at most `target_edge_length`.
 
-    Uses trimesh's `subdivide_to_size` which recursively splits long edges.
-    Skips subdivision entirely if the mesh is already fine enough — that's
-    the common case for already-subdivided CAD output or high-poly prints.
+    Uses *uniform* subdivision: every face is split into four (midpoint
+    subdivision) per iteration, until the longest edge falls under the
+    target. `trimesh.remesh.subdivide_to_size` would be cheaper because it
+    only splits LONG edges — but on a non-uniformly-tessellated input it
+    creates T-junctions (one face's midpoint isn't shared with its
+    neighbour) which break the manifold property: ~1.7 % of the
+    subdivided edges end up as boundary or non-manifold, the patch
+    partition fragments (one CAD body went from 1 patch to 38 patches
+    after subdivide_to_size), and the geodesic engine then can't find
+    seeds for the spurious patches. Uniform subdivision preserves
+    manifoldness at the cost of a denser mesh (~2.5× more faces on
+    irregularly-tessellated input; identical on uniformly-tessellated
+    cubes).
 
-    Raises `ValueError` if the projected face count would exceed `face_cap`.
+    Raises `ValueError` if the projected face count would exceed
+    `face_cap`.
     """
     if target_edge_length <= 0:
         raise ValueError(
@@ -72,53 +83,33 @@ def subdivide_for_geodesic(
         )
         return mesh
 
-    # Rough projection of face growth: each edge longer than the target gets
-    # split log2(L/target) times, splitting one triangle into ~4 each time.
-    # This is a loose upper bound — typically the real count is lower because
-    # neighbouring triangles share split edges.
-    long_edges = edge_lengths > target_edge_length
-    if long_edges.any():
-        ratios = edge_lengths[long_edges] / target_edge_length
-        splits = np.ceil(np.log2(ratios)).astype(int).clip(min=1)
-        projected_faces = int(len(mesh.faces) + (4 ** splits).sum())
-    else:
-        projected_faces = len(mesh.faces)
-
-    if projected_faces > face_cap * 4:
-        # The 4x slack accounts for the bound being loose; if even that is over
-        # the cap, refuse outright.
+    # Each uniform subdivision pass quadruples the face count and halves
+    # the maximum edge length. iters = ceil(log2(max_edge / target)).
+    iters_needed = max(1, int(np.ceil(np.log2(max_edge / target_edge_length))))
+    projected_faces = len(mesh.faces) * (4 ** iters_needed)
+    if projected_faces > face_cap:
         raise ValueError(
             f"surface_voronoi.subdivide_for_geodesic: input mesh would "
-            f"subdivide to ~{projected_faces} faces at target edge length "
-            f"{target_edge_length:.3f} mm, well over the {face_cap} cap. "
-            f"Increase --target-edge-length or use --engine tangent."
+            f"subdivide to {projected_faces} faces in {iters_needed} "
+            f"uniform pass(es) (target edge {target_edge_length:.3f} mm), "
+            f"over the {face_cap} cap. Increase --target-edge-length or "
+            f"use --engine tangent."
         )
 
     progress.log(
-        f"geodesic: subdividing {len(mesh.faces)} faces, max edge "
-        f"{max_edge:.3f} mm -> target {target_edge_length:.3f} mm"
+        f"geodesic: uniformly subdividing {len(mesh.faces)} faces, max edge "
+        f"{max_edge:.3f} mm -> target {target_edge_length:.3f} mm "
+        f"({iters_needed} pass(es))"
     )
-    new_vertices, new_faces = trimesh.remesh.subdivide_to_size(
-        mesh.vertices, mesh.faces, max_edge=target_edge_length
-    )
-
-    if len(new_faces) > face_cap:
-        raise ValueError(
-            f"surface_voronoi.subdivide_for_geodesic: subdivided mesh has "
-            f"{len(new_faces)} faces, over the {face_cap} cap. Increase "
-            f"--target-edge-length or use --engine tangent."
-        )
-
-    sub = trimesh.Trimesh(
-        vertices=new_vertices, faces=new_faces, process=False
-    )
-    # Preserve face winding from the input; subdivide_to_size keeps orientation
-    # but we run merge_vertices to drop duplicate vertices that recursive
-    # splitting can introduce on shared edges.
+    v = mesh.vertices
+    f = mesh.faces
+    for _ in range(iters_needed):
+        v, f = trimesh.remesh.subdivide(v, f)
+    sub = trimesh.Trimesh(vertices=v, faces=f, process=False)
     sub.merge_vertices()
     progress.log(
         f"geodesic: subdivided to {len(sub.faces)} faces, "
-        f"{len(sub.vertices)} vertices"
+        f"{len(sub.vertices)} vertices, watertight={sub.is_watertight}"
     )
     return sub
 
