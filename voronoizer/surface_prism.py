@@ -50,13 +50,20 @@ def build_prism_from_loop(
             f"({len(loop)} vertices)"
         )
     P = loop.positions
-    # Use raw face normals at each loop vertex. Smoothed (barycentric) normals
-    # were tried for sharp-edge cases but did not reduce manifold3d twin-vertex
-    # artefacts on a cube — and slightly hurt on the sphere. Keeping face
-    # normals matches the plan's "each boundary vertex already has a surface
-    # position and a face normal".
-    face_normals = np.asarray(mesh.face_normals, dtype=float)
-    n = face_normals[loop.face_ids]
+    # Use the loop's smoothed (barycentric vertex-normal) normals rather
+    # than raw face normals. Face normals are piecewise constant per
+    # mesh face, so on a subdivided low-poly input two adjacent loop
+    # vertices that sit on different parent faces have a sharp normal
+    # discontinuity — which translates to jagged steps in the prism's
+    # side walls and visible jagged-edge holes in the boolean cut. The
+    # smoothed normals (computed once in surface_boundary._smoothed_normals_at
+    # at every Loop construction point) interpolate vertex normals
+    # barycentrically inside each face, giving a continuous normal
+    # field that follows the underlying smooth surface even on coarse
+    # tessellations. On a flat patch the two are identical (vertex
+    # normals all equal the face normal there).
+    _ = mesh  # kept in signature; no longer used directly here
+    n = loop.normals
     # Forward boundary tangent at each vertex (central difference around the
     # closed loop).
     fwd = _normalize_rows(np.roll(P, -1, axis=0) - np.roll(P, 1, axis=0))
