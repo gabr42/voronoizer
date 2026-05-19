@@ -34,6 +34,7 @@ Stage 7 (boolean subtract) is `perforate.perforate`, unchanged.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -221,6 +222,27 @@ def build_geodesic_cells(
     _, _, seed_face_for_patch = _pq_for_patch.on_surface(seeds.points)
     seed_patch = face_comp[np.asarray(seed_face_for_patch, dtype=int)]
 
+    # Per-patch maximum intra-patch dihedral. Used to distinguish a
+    # "feature-y" patch (a CAD body's single patch with fillets that
+    # span 30° of normal range) from a "smoothly curved" patch (a
+    # sphere with intra-patch dihedrals under 3°). Wraparound clipping
+    # downstream applies only to feature-y patches; without this
+    # check the sphere's cells (which legitimately span a small range
+    # of normals as the loop walks the great circle) get incorrectly
+    # clipped.
+    n_patches = int(face_comp.max()) + 1 if len(face_comp) else 0
+    patch_max_dihedral_rad = np.zeros(n_patches, dtype=float)
+    fa = sub_mesh.face_adjacency
+    angles_all = sub_mesh.face_adjacency_angles
+    if len(fa) > 0:
+        for p_id in range(n_patches):
+            same_patch = (
+                (face_comp[fa[:, 0]] == p_id)
+                & (face_comp[fa[:, 1]] == p_id)
+            )
+            if same_patch.any():
+                patch_max_dihedral_rad[p_id] = float(angles_all[same_patch].max())
+
     # Stage 3 — extract closed boundary loops per cell.
     with progress.step("geodesic: extract boundary loops"):
         loops_per_cell = extract_cell_loops(sub_mesh, face_labels)
@@ -272,26 +294,48 @@ def build_geodesic_cells(
             stats.too_few_vertices += 1
             continue
 
-        # Filter loop to vertices whose surface normal is within ~60° of
-        # the seed's normal. This keeps the cell from "wrapping" around
-        # a feature (e.g. seed on the body's top face but loop reaching
-        # over a fillet onto the side): the side-face vertices end up
-        # very far in the seed's 2D tangent plane, so the convex hull
-        # becomes enormous and the seed-normal-extruded prism cuts a
-        # huge column of material from the adjacent face. Restricting
-        # the loop to seed-face-aligned vertices clips the cell to the
-        # local face vicinity. Sphere cells (normals all within ~21° of
-        # seed normal) are untouched by this filter.
-        if len(loop) > 0:
-            seed_n_arr = np.asarray(seed_normal, dtype=float)
-            seed_n_arr = seed_n_arr / max(float(np.linalg.norm(seed_n_arr)), 1e-12)
+        # Wraparound loop pre-filter. Applied only when:
+        #   * The cell's home patch has no sharp-edge boundary (single-
+        #     patch mesh — sphere, body, organic blob), and
+        #   * The patch contains intermediate dihedrals (≥ 10°) that
+        #     indicate features the loop could wrap around — i.e. it's
+        #     a CAD-style mesh with fillets, NOT a smoothly curved
+        #     surface (sphere, where intra-patch dihedrals are ≤ 3°).
+        #
+        # When both apply, the loop's wraparound vertices (loop visiting
+        # an adjacent face past a fillet) are removed before the convex
+        # hull. Otherwise (multi-patch mesh OR smooth-everywhere patch)
+        # the full loop is used unchanged.
+        patch_id_pre = int(seed_patch[s_idx])
+        patch_has_boundary = len(
+            patch_boundary_vertex_indices(sub_mesh, face_comp, patch_id_pre)
+        ) >= 3
+        patch_is_featured = math.degrees(
+            patch_max_dihedral_rad[patch_id_pre]
+        ) >= 10.0
+        seed_n_arr = np.asarray(seed_normal, dtype=float)
+        seed_n_arr = seed_n_arr / max(float(np.linalg.norm(seed_n_arr)), 1e-12)
+        if (
+            not patch_has_boundary
+            and patch_is_featured
+            and len(loop) > 0
+        ):
             cos_with_seed = loop.normals @ seed_n_arr
             face_aligned = cos_with_seed > 0.5  # within 60°
-            if face_aligned.sum() >= 3 and not face_aligned.all():
+            seed_3d = np.asarray(seed, dtype=float)
+            rel = loop.positions - seed_3d
+            tan_rel = rel - (rel @ seed_n_arr)[:, None] * seed_n_arr
+            dist_in_tangent = np.linalg.norm(tan_rel, axis=1)
+            max_polygon_radius = math.sqrt(
+                float(mesh.area) / (max(n_real, 1) * math.pi)
+            ) * 1.5
+            within_radius = dist_in_tangent <= max_polygon_radius
+            combined_keep = face_aligned & within_radius
+            if combined_keep.sum() >= 3 and not combined_keep.all():
                 loop = Loop(
-                    positions=loop.positions[face_aligned],
-                    face_ids=loop.face_ids[face_aligned],
-                    normals=loop.normals[face_aligned],
+                    positions=loop.positions[combined_keep],
+                    face_ids=loop.face_ids[combined_keep],
+                    normals=loop.normals[combined_keep],
                 )
 
         # Polygon construction in the seed's 2D tangent plane (Phase 1's
