@@ -47,6 +47,7 @@ from voronoizer.surface_boundary import (
     bezier_smooth_on_surface,
     convex_polygon_2d_in_tangent,
     extract_cell_loops,
+    inset_loop_on_surface,
     project_polygon_2d_to_surface,
     resample_loop_arclen,
 )
@@ -56,6 +57,7 @@ from voronoizer.surface_voronoi import (
     face_components as compute_face_components,
     face_labels_from_vertex_labels,
     patch_boundary_vertex_indices,
+    patch_is_flat,
     subdivide_for_geodesic,
 )
 from voronoizer.voronoi_cells import (
@@ -266,41 +268,55 @@ def build_geodesic_cells(
             continue
         polygon_2d, u_basis, v_basis = poly
 
-        # Inset in 2D — strut/2 shrinkage is geometrically exact and
-        # respects patch-boundary cube edges (which `inset_loop_on_surface`
-        # botched because re-projection snaps inset points back onto the
-        # boundary edge). We also clip the polygon by the patch boundary
-        # inset by `shell_thickness`: that keeps the cell's inner ring
-        # within the patch's inner-wall area on a cube and prevents the
-        # prism from eating into adjacent faces' shell material near
-        # corners. For closed-component patches (sphere, fillet) the clip
-        # is a no-op (no patch boundary to clip against).
+        # Flat vs curved branch — see `surface_voronoi.patch_is_flat`.
+        # Flat (cube face): the orthogonal 2D tangent projection is exact,
+        # so the strut/2 inset can be done directly in 2D alongside the
+        # shell_thickness patch-boundary clip. Curved (sphere / fillet):
+        # the orthogonal projection foreshortens far-from-seed points,
+        # leaving cells too small and walls visibly too wide; instead we
+        # clip in 2D for the patch boundary only, project to the surface,
+        # and apply the strut/2 inset per-vertex on the surface so the
+        # geodesic strut width is correct.
         patch_id = int(seed_patch[s_idx])
+        flat = patch_is_flat(sub_mesh, face_comp, patch_id)
         patch_clip = _patch_clip_halfplanes(
             sub_mesh, face_comp, patch_id, seed, u_basis, v_basis
         )
-        inset_2d = _polygon_clip_and_inset(
-            polygon_2d,
-            strut_half=inset_distance,
-            patch_clip_eqs=patch_clip,
-            shell_thickness=shell_thickness,
-        )
-        if inset_2d is None or len(inset_2d) < 3:
-            stats.too_few_vertices += 1
-            continue
-        # Lift the inset 2D polygon back onto the surface (one snap per
-        # corner). On a flat cube face this is identity; on a sphere the
-        # corners land on the sphere.
-        inset_loop = project_polygon_2d_to_surface(
-            inset_2d, seed, u_basis, v_basis, sub_mesh, proximity
-        )
+        if flat:
+            inset_2d = _polygon_clip_and_inset(
+                polygon_2d,
+                strut_half=inset_distance,
+                patch_clip_eqs=patch_clip,
+                shell_thickness=shell_thickness,
+            )
+            if inset_2d is None or len(inset_2d) < 3:
+                stats.too_few_vertices += 1
+                continue
+            inset_loop = project_polygon_2d_to_surface(
+                inset_2d, seed, u_basis, v_basis, sub_mesh, proximity
+            )
+        else:
+            # Curved: 2D patch clip only (no strut inset in 2D), then
+            # project back onto the surface, then surface-aware inset.
+            clipped_2d = _polygon_clip_and_inset(
+                polygon_2d,
+                strut_half=0.0,
+                patch_clip_eqs=patch_clip,
+                shell_thickness=shell_thickness,
+            )
+            if clipped_2d is None or len(clipped_2d) < 3:
+                stats.too_few_vertices += 1
+                continue
+            clipped_loop = project_polygon_2d_to_surface(
+                clipped_2d, seed, u_basis, v_basis, sub_mesh, proximity
+            )
+            inset_loop = inset_loop_on_surface(
+                clipped_loop, sub_mesh, proximity, inset=inset_distance
+            )
         if len(inset_loop) < 3:
             stats.too_few_vertices += 1
             continue
-        # Bézier smoothing ON THE SURFACE — each sample is snapped to the
-        # mesh, so curved surfaces (sphere, fillet) keep their cells
-        # genuinely on-surface rather than as 2D shadows of a tangent
-        # polygon. On a flat face the snap is identity.
+        # Bézier smoothing ON THE SURFACE — each sample snapped to the mesh.
         loop = bezier_smooth_on_surface(inset_loop, sub_mesh, proximity)
         if len(loop) < 3:
             stats.too_few_vertices += 1

@@ -270,6 +270,44 @@ def face_components(
     return _face_components(mesh, sharp_angle_deg)
 
 
+def patch_is_flat(
+    mesh: trimesh.Trimesh,
+    face_components: np.ndarray,
+    patch_id: int,
+    tol_deg: float = 1.0,
+) -> bool:
+    """True iff every face in patch `patch_id` has its normal within
+    `tol_deg` of the patch's mean normal.
+
+    A flat patch (every cube face) can have its cell inset done in the
+    seed's 2D tangent plane — the projection is exact, so the 2D inset
+    distance equals the surface distance and the patch-boundary clipping
+    (cube-edge `shell_thickness` margin) lines up naturally.
+
+    A curved patch (the whole sphere, a filleted region of a CAD body)
+    must have its inset done on the surface itself. The orthogonal
+    tangent-plane projection that we use to build the convex hull
+    foreshortens points far from the seed — `R·sin(θ)` instead of
+    `R·θ` — so a `strut/2` 2D inset under-shrinks the cell on the
+    surface, leaving visibly wide walls between adjacent holes. Doing
+    the strut/2 inset per-vertex along the surface (each vertex shifts
+    `strut/2` along `n × t`, then snaps back to the mesh) gives the
+    correct geodesic strut width regardless of curvature.
+    """
+    faces_idx = np.where(face_components == patch_id)[0]
+    if len(faces_idx) == 0:
+        return True
+    normals = mesh.face_normals[faces_idx]
+    mean = normals.mean(axis=0)
+    norm = float(np.linalg.norm(mean))
+    if norm < 1e-9:
+        return False  # normals all over the place → definitely curved
+    mean_unit = mean / norm
+    cos_dev = normals @ mean_unit
+    max_angle_rad = float(np.arccos(np.clip(cos_dev, -1.0, 1.0)).max())
+    return math.degrees(max_angle_rad) < tol_deg
+
+
 def _build_component_adjacency(
     mesh: trimesh.Trimesh, face_components: np.ndarray, comp_id: int
 ) -> dict[int, list[tuple[int, float]]]:
