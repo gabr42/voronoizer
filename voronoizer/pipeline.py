@@ -223,11 +223,11 @@ def run(
     # face winding. On CAD bodies with small fillet radii relative to the
     # shell thickness, the boolean leaves small pockets of wall material
     # un-cut where the cell prism's per-vertex extrusion couldn't fully
-    # enclose the fillet's curved wall geometry. Those pockets become
-    # tiny disconnected components inside otherwise-correct holes —
-    # printable but visually wrong, and they trip up slicers that
-    # report them as separate solids. Keep only components whose volume
-    # is at least 1 % of the largest (which is always the main shell).
+    # enclose the fillet's curved wall geometry. Manifold3d additionally
+    # emits stray 1-2 face fragments with essentially zero volume as
+    # numerical noise. Drop both: components whose volume is < 1 % of the
+    # main shell's, AND components with fewer than 4 faces or near-zero
+    # volume regardless of ratio.
     with progress.step("clean perforated output"):
         before_faces = len(perforated.faces)
         parts = perforated.split(only_watertight=False)
@@ -235,18 +235,21 @@ def run(
             parts = sorted(parts, key=lambda p: abs(p.volume), reverse=True)
             main = parts[0]
             main_vol = abs(main.volume)
-            keep = [main] + [
-                p for p in parts[1:] if abs(p.volume) >= 0.01 * main_vol
-            ]
-            dropped = len(parts) - len(keep)
-            if dropped > 0:
-                dropped_vol = sum(
-                    abs(p.volume) for p in parts[1:] if abs(p.volume) < 0.01 * main_vol
-                )
+            keep = [main]
+            dropped_vol = 0.0
+            dropped_count = 0
+            for p in parts[1:]:
+                v = abs(p.volume)
+                if v < 0.01 * main_vol or len(p.faces) < 4 or v < 1e-6:
+                    dropped_vol += v
+                    dropped_count += 1
+                else:
+                    keep.append(p)
+            if dropped_count > 0:
                 progress.warn(
-                    f"dropped {dropped} disconnected leftover component(s) "
-                    f"({dropped_vol:.3f} mm³ total) — artefacts of the "
-                    f"boolean leaving material un-cut at fillets"
+                    f"dropped {dropped_count} disconnected leftover component(s) "
+                    f"({dropped_vol:.3f} mm³ total) — artefacts of the boolean "
+                    f"leaving slivers at fillet near-tangencies"
                 )
             if len(keep) == 1:
                 perforated = keep[0]
