@@ -88,6 +88,7 @@ def run(
     repair: bool,
     edge_margin: float | None = None,
     chamfer: float = 0.0,
+    chamfer_inner: float | None = None,
     soft_edge_angle_deg: float = 25.0,
     shell_only: bool = False,
     cutters_only: bool = False,
@@ -184,6 +185,7 @@ def run(
                 strut_thickness=strut_thickness,
                 mirror_seeds=mirrors,
                 chamfer=chamfer,
+                chamfer_inner=chamfer_inner,
             )
     elif engine == "geodesic":
         with progress.step("build cells (geodesic engine)"):
@@ -193,6 +195,7 @@ def run(
                 shell_thickness=shell_thickness,
                 strut_thickness=strut_thickness,
                 chamfer=chamfer,
+                chamfer_inner=chamfer_inner,
                 target_edge_length=target_edge_length,
                 sharp_angle_deg=soft_edge_angle_deg,
             )

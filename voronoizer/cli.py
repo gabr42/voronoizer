@@ -56,8 +56,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--chamfer",
         type=float, default=0.0,
-        help="Chamfer distance (mm) for hole edges where they meet the shell "
-             "surfaces. 0 = no chamfer (default). Clamped to safe maximum.",
+        help="Chamfer distance (mm) for OUTER hole edges where they meet the "
+             "outer shell surface. 0 = no chamfer (default). Clamped to "
+             "min(0.49 * strut, 0.49 * shell_thickness). Without "
+             "--inner-chamfer, the same value is also used for the inner "
+             "side (back-compat).",
+    )
+    p.add_argument(
+        "--inner-chamfer",
+        type=float, default=None,
+        help="Chamfer distance (mm) for INNER hole edges where they meet "
+             "the inner cavity surface. Defaults to matching --chamfer. "
+             "Set to 0 with --chamfer > 0 to bevel only the outer side and "
+             "keep the inner contour as a clean perpendicular cut.",
     )
     p.add_argument(
         "--soft-edge-angle",
@@ -141,6 +152,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("error: --normal-angle must be in (0, 90)")
     if args.chamfer < 0:
         raise SystemExit("error: --chamfer must be >= 0")
+    if args.inner_chamfer is not None and args.inner_chamfer < 0:
+        raise SystemExit("error: --inner-chamfer must be >= 0")
     if not (0.0 < args.soft_edge_angle < 180.0):
         raise SystemExit("error: --soft-edge-angle must be in (0, 180)")
     if args.target_edge_length is not None and args.target_edge_length <= 0:
@@ -178,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             repair=args.repair,
             edge_margin=args.edge_margin,
             chamfer=args.chamfer,
+            chamfer_inner=args.inner_chamfer,
             soft_edge_angle_deg=args.soft_edge_angle,
             shell_only=args.shell,
             cutters_only=args.cutters,

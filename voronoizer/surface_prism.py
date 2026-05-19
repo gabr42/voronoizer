@@ -27,6 +27,7 @@ def build_prism_from_loop(
     shell_thickness: float,
     chamfer: float,
     safety: float,
+    chamfer_inner: float | None = None,
 ) -> trimesh.Trimesh:
     """Build a surface-aware prism cutter from a Phase-2 inset loop.
 
@@ -140,4 +141,5 @@ def build_prism_from_loop(
         chamfer=chamfer,
         safety=safety,
         force_lift=True,
+        chamfer_inner=chamfer_inner,
     )

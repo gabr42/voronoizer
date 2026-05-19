@@ -281,6 +281,22 @@ def _surface_frames(
     return P, n, d_out
 
 
+def _clamp_chamfer_value(
+    value: float, strut_thickness: float, shell_thickness: float, name: str
+) -> float:
+    """Clamp a chamfer value to keep struts and the straight wall non-
+    degenerate. Shared by `--chamfer` and `--inner-chamfer`."""
+    original = value
+    value = max(0.0, value)
+    value = min(value, 0.49 * strut_thickness, 0.49 * shell_thickness)
+    if value < original - 1e-9:
+        progress.warn(
+            f"{name} {original:.3f} mm clamped to {value:.3f} mm "
+            f"(limit: min(0.49 * strut, 0.49 * shell_thickness))"
+        )
+    return value
+
+
 def _build_prism_surface_aware(
     polygon_2d: np.ndarray,
     P: np.ndarray,
@@ -293,8 +309,9 @@ def _build_prism_surface_aware(
     chamfer: float,
     safety: float,
     force_lift: bool = False,
+    chamfer_inner: float | None = None,
 ) -> trimesh.Trimesh:
-    """Phase-1 surface-aware prism cutter.
+    """Phase-1 surface-aware prism cutter with optional asymmetric chamfer.
 
     Each polygon vertex i has its own (P_i, n_i, d_i). Ring positions are
     built per-vertex along the local frame, so the hole edge always sits on
@@ -302,17 +319,28 @@ def _build_prism_surface_aware(
     seed-tangent prism would intersect the curved surface at a shallow
     angle and produce non-tangent cuts.
 
-    With `chamfer > 0`, six rings: cap-top, outer chamfered, chamfer end,
-    inner chamfer start, inner chamfered, cap-bot. The chamfered rings are
-    lifted 0.05 mm off the surface along each `n_i` on curved meshes —
-    that breaks the near-tangencies that otherwise make manifold3d emit
-    twin vertices (the polygon expansion is widened to compensate so the
-    visible chamfer width is unchanged).
+    `chamfer` is the OUTER chamfer (where the hole meets the outer shell
+    surface). `chamfer_inner` is the inner chamfer; if `None` it defaults
+    to `chamfer` for backward compatibility. Set `chamfer_inner=0` with
+    a non-zero `chamfer` to chamfer only the outer side and leave the
+    inner contour as a clean perpendicular cut.
 
-    With `chamfer = 0`, four rings: cap-top, outer, inner, cap-bot. The
-    outer and inner rings sit exactly on the corresponding shell
-    surfaces at each polygon vertex. No lift needed — there are no
-    chamfered positions for adjacent cells to share.
+    Ring count varies with which sides are chamfered:
+
+      * 4 rings  — no chamfer on either side:
+          cap-top, outer, inner, cap-bot.
+      * 5 rings  — chamfer on one side only:
+          cap-top [+widened if outer], outer-chamfered,
+          chamfer-end, inner [-widened if inner], cap-bot.
+      * 6 rings  — chamfer on both sides:
+          cap-top widened, outer-chamfered, chamfer-end,
+          inner-chamfer-start, inner-chamfered, cap-bot widened.
+
+    Chamfered rings are lifted 0.05 mm off the surface on curved /
+    force_lift inputs so manifold3d's boolean cuts the prism in the
+    chamfer transition rather than exactly on the surface; the polygon
+    expansion is widened by the same amount so the visible chamfer
+    width is unchanged.
 
     The top cap centroid is pushed `max(safety, R_local)` mm along the
     seed's normal on curved surfaces. A planar cap-wheel triangle from a
@@ -325,48 +353,41 @@ def _build_prism_surface_aware(
     bottom cap stays near the seed (inside the sphere is empty space, so
     cap-triangles dipping further inward there are harmless).
     """
+    if chamfer_inner is None:
+        chamfer_inner = chamfer
+    chamfer_outer = chamfer
+
     N = len(polygon_2d)
     curved = np.isfinite(R_local) and R_local > 0.0
-    # `force_lift` is the Phase-2 path: geodesic boundary loops routinely
-    # span sharp surface edges (cube corners, etc.), where two adjacent
-    # ring-1 vertices sit on different faces. The wall between them passes
-    # exactly along the cube's corner edge — manifold3d sees that as a
-    # near-coincidence with the shell's own edge and emits twin vertices.
-    # Lifting the outer/inner rings by 0.05 mm breaks the coincidence.
     apply_lift = curved or force_lift
+    lift = 0.05 if apply_lift else 0.0
 
-    if chamfer > 0.0:
-        # Lift the chamfered rings 0.05 mm off the surface so manifold3d
-        # cuts the prism in the chamfer transition rather than exactly at
-        # the chamfered position; widen the polygon expansion to keep the
-        # visible chamfer width the same. Flat surfaces skip the lift —
-        # they have no near-tangencies to break, and the lift would only
-        # reduce the visible chamfer.
-        lift = 0.05 if apply_lift else 0.0
-        expansion = chamfer + lift
-        chamf_lat = expansion * d_out  # (N, 3)
-        ring_pos = [
-            P + chamf_lat + safety * n,                          # 0: cap top
-            P + chamf_lat + lift * n,                            # 1: outer chamfered
-            P - chamfer * n,                                     # 2: chamfer end
-            P - (shell_thickness - chamfer) * n,                 # 3: inner chamfer start
-            P - shell_thickness * n + chamf_lat - lift * n,      # 4: inner chamfered
-            P - shell_thickness * n + chamf_lat - lift * n - safety * n,  # 5: cap bot
-        ]
+    co = float(chamfer_outer)
+    ci = float(chamfer_inner)
+    has_outer = co > 0.0
+    has_inner = ci > 0.0
+
+    # Lateral expansions for the chamfered rings.
+    chamf_lat_outer = (co + lift) * d_out if has_outer else 0.0
+    chamf_lat_inner = (ci + lift) * d_out if has_inner else 0.0
+
+    ring_pos: list[np.ndarray] = []
+    # Top side (outer cap and outer surface region).
+    if has_outer:
+        ring_pos.append(P + chamf_lat_outer + safety * n)           # 0: cap top widened
+        ring_pos.append(P + chamf_lat_outer + lift * n)             # 1: outer chamfered
+        ring_pos.append(P - co * n)                                 # 2: outer chamfer end
     else:
-        # No-chamfer surface-aware prism still needs to lift the outer /
-        # inner surface rings 0.05 mm off the shell on curved meshes —
-        # adjacent cells' walls follow the curve closely and manifold3d
-        # otherwise sees them as near-tangent at the surface, producing
-        # twin-vertex slivers. The lateral position is the same on both
-        # sides of the lift, so the visible hole shape is unchanged.
-        lift = 0.05 if apply_lift else 0.0
-        ring_pos = [
-            P + safety * n,                                      # 0: cap top
-            P + lift * n,                                        # 1: outer surface
-            P - shell_thickness * n - lift * n,                  # 2: inner surface
-            P - shell_thickness * n - safety * n,                # 3: cap bot
-        ]
+        ring_pos.append(P + safety * n)                             # 0: cap top
+        ring_pos.append(P + lift * n)                               # 1: outer surface
+    # Bottom side (inner surface region and inner cap).
+    if has_inner:
+        ring_pos.append(P - (shell_thickness - ci) * n)             # inner chamfer start
+        ring_pos.append(P - shell_thickness * n + chamf_lat_inner - lift * n)              # inner chamfered
+        ring_pos.append(P - shell_thickness * n + chamf_lat_inner - lift * n - safety * n) # cap bot widened
+    else:
+        ring_pos.append(P - shell_thickness * n - lift * n)         # inner surface
+        ring_pos.append(P - shell_thickness * n - safety * n)       # cap bot
     n_rings = len(ring_pos)
 
     cap_top_height = max(safety, R_local) if curved else safety
@@ -511,6 +532,7 @@ def build_shrunken_cells(
     mirror_seeds: np.ndarray | None = None,
     bezier_samples_per_edge: int = _BEZIER_SAMPLES_PER_EDGE,
     chamfer: float = 0.0,
+    chamfer_inner: float | None = None,
 ) -> tuple[list[trimesh.Trimesh], CellBuildStats]:
     """Build a smooth-edge prism cutter for each seed.
 
@@ -520,19 +542,17 @@ def build_shrunken_cells(
     real outer / inner shell surface at every vertex (Phase 1 surface-aware
     prism). The non-chamfer path is unchanged.
 
-    `chamfer` (mm) bevels the hole edges where they meet the shell surfaces.
-    Clamped to keep struts and the straight wall section non-degenerate.
+    `chamfer` (mm) is the OUTER chamfer; `chamfer_inner` (mm) is the inner
+    chamfer (defaults to `chamfer` for backward compatibility). Pass
+    `chamfer_inner=0` to bevel only the outer edge. Both values are
+    clamped to keep struts and the straight wall section non-degenerate.
     """
-    # Clamp chamfer: must leave some strut between cells at the surface
-    # (gap = strut - 2*chamfer) and a non-empty straight wall in the middle.
-    chamfer_in = chamfer
-    chamfer = max(0.0, chamfer)
-    chamfer = min(chamfer, 0.49 * strut_thickness, 0.49 * shell_thickness)
-    if chamfer < chamfer_in - 1e-9:
-        progress.warn(
-            f"chamfer {chamfer_in:.3f} mm clamped to {chamfer:.3f} mm "
-            f"(limit: min(0.49 * strut, 0.49 * shell_thickness))"
-        )
+    if chamfer_inner is None:
+        chamfer_inner = chamfer
+    chamfer = _clamp_chamfer_value(chamfer, strut_thickness, shell_thickness, "chamfer")
+    chamfer_inner = _clamp_chamfer_value(
+        chamfer_inner, strut_thickness, shell_thickness, "chamfer-inner"
+    )
 
     mesh_bounds = mesh.bounds
 
@@ -627,6 +647,7 @@ def build_shrunken_cells(
                 shell_thickness=shell_thickness,
                 chamfer=chamfer,
                 safety=safety,
+                chamfer_inner=chamfer_inner,
             )
         except Exception:
             stats.degenerate += 1

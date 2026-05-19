@@ -169,6 +169,7 @@ def build_geodesic_cells(
     target_edge_length: float | None = None,
     resample_step: float | None = None,
     sharp_angle_deg: float = 25.0,
+    chamfer_inner: float | None = None,
 ) -> tuple[list[trimesh.Trimesh], GeodesicCellStats]:
     """Build prism cutters for each seed using the geodesic engine."""
     # Stage 1 — subdivide. Default target = strut/2: edge length 50 % of the
@@ -452,6 +453,7 @@ def build_geodesic_cells(
                 R_local=R_local,
                 shell_thickness=shell_thickness,
                 chamfer=chamfer,
+                chamfer_inner=chamfer_inner,
                 safety=safety,
             )
         except Exception:
