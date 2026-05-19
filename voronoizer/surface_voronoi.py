@@ -261,6 +261,79 @@ def face_components(
     return _face_components(mesh, sharp_angle_deg)
 
 
+def smooth_vertex_normals_within_patches(
+    mesh: trimesh.Trimesh,
+    face_components: np.ndarray,
+    iterations: int = 5,
+) -> np.ndarray:
+    """Laplacian-smooth vertex normals across each smooth patch.
+
+    Trimesh's default `mesh.vertex_normals` is an area-weighted average
+    of incident face normals. After uniform subdivision, every subdivided
+    child face inherits its parent's normal exactly, so vertex normals
+    are PIECEWISE CONSTANT per parent face — with discontinuities at the
+    original face boundaries that survive subdivision. Those
+    discontinuities translate to stepped prism walls in the geodesic
+    engine and produce visible jagged-edge holes on low-poly CAD bodies.
+
+    This function diffuses the vertex normals iteratively: each vertex's
+    new normal is the unweighted average of its 1-ring same-patch
+    neighbours' normals, renormalised. Cross-patch edges (sharp
+    dihedrals) are NOT used as diffusion bridges, so sharp features
+    are preserved exactly — a cube's face-interior vertex normals stay
+    axis-aligned even after many iterations.
+
+    Returns an (NV, 3) array of unit-length smoothed normals.
+    """
+    NV = len(mesh.vertices)
+    if NV == 0:
+        return mesh.vertex_normals.copy()
+    normals = mesh.vertex_normals.copy()
+    if iterations <= 0:
+        return normals
+
+    # Build intra-patch adjacency. Mesh.edges_unique enumerates each edge
+    # once; we filter to edges whose two adjacent faces lie in the same
+    # patch (so cross-patch sharp-edge connections aren't bridges for
+    # normal diffusion).
+    fa = mesh.face_adjacency
+    fa_edges = mesh.face_adjacency_edges
+    intra_edges: list[tuple[int, int]] = []
+    for (f_a, f_b), (v_a, v_b) in zip(fa, fa_edges):
+        if face_components[f_a] == face_components[f_b]:
+            intra_edges.append((int(v_a), int(v_b)))
+
+    if not intra_edges:
+        return normals
+
+    from scipy.sparse import csr_matrix
+    rows = np.concatenate(
+        [np.array([a for a, _ in intra_edges]), np.array([b for _, b in intra_edges])]
+    )
+    cols = np.concatenate(
+        [np.array([b for _, b in intra_edges]), np.array([a for _, a in intra_edges])]
+    )
+    data = np.ones(len(rows), dtype=float)
+    A = csr_matrix((data, (rows, cols)), shape=(NV, NV))
+    row_sums = np.asarray(A.sum(axis=1)).ravel()
+    # Diagonal scaling factor: 1 / row_sum for vertices with neighbours, 0 otherwise.
+    scale = np.where(row_sums > 0, 1.0 / np.maximum(row_sums, 1e-12), 0.0)
+    # Vertices with no intra-patch neighbours (isolated in their patch) keep
+    # their original normal across iterations.
+    has_nbrs = row_sums > 0
+
+    for _ in range(iterations):
+        # avg[i] = mean of normals[j] for j in neighbours of i
+        avg = A.dot(normals) * scale[:, None]
+        # Half-step blend keeps the result close to the starting normal
+        # field while still propagating smoothing — works better than a
+        # full replacement on coarsely tessellated input.
+        new_normals = np.where(has_nbrs[:, None], 0.5 * normals + 0.5 * avg, normals)
+        norm = np.linalg.norm(new_normals, axis=1, keepdims=True)
+        normals = new_normals / np.where(norm > 1e-12, norm, 1.0)
+    return normals
+
+
 def patch_is_flat(
     mesh: trimesh.Trimesh,
     face_components: np.ndarray,

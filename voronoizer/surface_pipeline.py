@@ -60,6 +60,7 @@ from voronoizer.surface_voronoi import (
     face_labels_from_vertex_labels,
     patch_boundary_vertex_indices,
     patch_is_flat,
+    smooth_vertex_normals_within_patches,
     subdivide_for_geodesic,
 )
 from voronoizer.voronoi_cells import (
@@ -185,6 +186,22 @@ def build_geodesic_cells(
     # them for the per-patch Dijkstra, and the per-cell loop downstream
     # needs them to look up patch-boundary clipping half-planes.
     face_comp = compute_face_components(sub_mesh, sharp_angle_deg)
+
+    # Smooth the subdivided mesh's vertex normals within each smooth
+    # patch. After uniform subdivision every child face inherits its
+    # parent's normal exactly, so trimesh's area-weighted vertex normals
+    # are piecewise constant per parent face — and the prism walls
+    # downstream pick up those discontinuities as stepped facets,
+    # producing visibly jagged hole edges on low-poly inputs. Patch-aware
+    # Laplacian smoothing diffuses normals only across same-patch
+    # adjacencies, so sharp dihedrals (cube edges) are still preserved
+    # exactly while smooth surfaces (sphere, filleted body) get a
+    # continuously varying normal field.
+    with progress.step("smooth vertex normals (patch-aware)"):
+        smoothed_n = smooth_vertex_normals_within_patches(
+            sub_mesh, face_comp, iterations=5
+        )
+        sub_mesh.vertex_normals = smoothed_n
 
     # Stage 2 — Dijkstra with sharp-edge barriers (Approach A). Edges whose
     # dihedral angle exceeds `sharp_angle_deg` get a high cost multiplier
