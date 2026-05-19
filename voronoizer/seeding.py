@@ -197,13 +197,24 @@ def sample_seeds_per_patch(
             seeds_per_patch[idx] += 1
             diff += 1
 
-    progress.log(
-        f"per-patch seeding: {int(eligible.sum())} eligible patch(es), "
-        f"distribution {seeds_per_patch[eligible].tolist()}"
+    progress.warn(
+        f"per-patch seeding: {n_patches} total patch(es), "
+        f"{int(eligible.sum())} eligible (area > {min_patch_area:.2f} mm²), "
+        f"{int((~eligible).sum())} skipped (too small). "
+        f"Allocation sums to {int(seeds_per_patch.sum())} seeds for "
+        f"requested count {count}."
+    )
+    # Per-patch area + allocation for diagnosis.
+    progress.warn(
+        "patch areas / allocations: " + ", ".join(
+            f"#{p}: {patch_area[p]:.1f} mm² → {int(seeds_per_patch[p])}"
+            for p in range(n_patches)
+        )
     )
 
     accepted_points: list[np.ndarray] = []
     accepted_normals: list[np.ndarray] = []
+    actual_per_patch = np.zeros(n_patches, dtype=int)
     for p in range(n_patches):
         n_pat = int(seeds_per_patch[p])
         if n_pat <= 0:
@@ -219,17 +230,32 @@ def sample_seeds_per_patch(
         over = max(n_pat * 3, n_pat + 8)
         seed_int = int(rng.integers(0, 2**31 - 1))
         try:
-            pts, fidx = trimesh.sample.sample_surface_even(patch_sub, over, seed=seed_int)
+            pts, fidx = trimesh.sample.sample_surface_even(
+                patch_sub, over, seed=seed_int
+            )
         except Exception:
-            pts, fidx = trimesh.sample.sample_surface(patch_sub, over, seed=seed_int)
+            pts, fidx = trimesh.sample.sample_surface(
+                patch_sub, over, seed=seed_int
+            )
         pts = np.asarray(pts)
         fidx = np.asarray(fidx)
+        # Fall back from "even" (rejection-based) to plain area-weighted
+        # sampling if "even" returned nothing — common on small / awkward
+        # patches where the rejection radius can't fit a single sample.
         if len(pts) == 0:
-            progress.warn(
-                f"per-patch seeding: patch {p} (area {patch_area[p]:.2f} mm²) "
-                f"yielded 0 seeds"
-            )
-            continue
+            try:
+                pts, fidx = trimesh.sample.sample_surface(
+                    patch_sub, max(1, n_pat), seed=seed_int + 1
+                )
+                pts = np.asarray(pts); fidx = np.asarray(fidx)
+            except Exception:
+                pts = np.zeros((0, 3)); fidx = np.zeros(0, dtype=int)
+        # Last-resort: place a seed at the centroid of the largest face.
+        if len(pts) == 0:
+            f_areas = patch_sub.area_faces
+            big = int(np.argmax(f_areas))
+            pts = patch_sub.vertices[patch_sub.faces[big]].mean(axis=0, keepdims=True)
+            fidx = np.array([big])
         if len(pts) > n_pat:
             sel = rng.choice(len(pts), size=n_pat, replace=False)
             pts = pts[sel]
@@ -239,6 +265,13 @@ def sample_seeds_per_patch(
         normals = normals / np.where(norms > 0, norms, 1.0)
         accepted_points.append(pts)
         accepted_normals.append(normals)
+        actual_per_patch[p] = len(pts)
+    progress.warn(
+        "actual seeds per patch after sampling: " + ", ".join(
+            f"#{p}: {int(actual_per_patch[p])}"
+            for p in range(n_patches) if seeds_per_patch[p] > 0
+        )
+    )
 
     if not accepted_points:
         raise RuntimeError(

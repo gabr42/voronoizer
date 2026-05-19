@@ -381,7 +381,7 @@ def build_geodesic_cells(
         cells.append(prism)
         stats.built += 1
 
-    progress.log(
+    progress.warn(
         f"geodesic cells built: {stats.built} / {stats.requested} "
         f"(no-loop={stats.no_loop}, short={stats.too_few_vertices}, "
         f"prism-failed={stats.prism_failed})"
