@@ -328,7 +328,7 @@ def build_geodesic_cells(
             dist_in_tangent = np.linalg.norm(tan_rel, axis=1)
             max_polygon_radius = math.sqrt(
                 float(mesh.area) / (max(n_real, 1) * math.pi)
-            ) * 1.5
+            ) * 2.0
             within_radius = dist_in_tangent <= max_polygon_radius
             combined_keep = face_aligned & within_radius
             if combined_keep.sum() >= 3 and not combined_keep.all():
