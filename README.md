@@ -11,8 +11,13 @@ voronoizer model.stl perforated.stl -t 2 -n 120 -s 1.5
 What it does, in order:
 
 1. Loads the STL.
-2. Hollows the body into a shell of the requested wall thickness (per-vertex
-   inward offset on smooth surfaces; voxel-based otherwise).
+2. Hollows the body into a shell of the requested wall thickness. Meshes
+   with sharp dihedrals (a cube) use a per-vertex least-squares offset so
+   corners solve to the analytic inner corner exactly; smooth meshes
+   (sphere, fillet-only CAD bodies) are subdivided down to ~thickness × 2
+   edge length and offset along patch-aware Laplacian-smoothed vertex
+   normals, so the inner surface stays smooth instead of becoming a
+   piecewise-flat offset of the low-poly input.
 3. Partitions the surface into smooth patches at sharp dihedral edges, then
    samples `N` seed points across them. Seeds are allocated proportionally to
    patch area, with at least one seed per non-trivial patch — so small side
@@ -61,8 +66,9 @@ Pulled in automatically by `pip install -e .`:
 
 - `trimesh` + `manifold3d` — mesh I/O and boolean operations
 - `numpy`, `scipy` — KD-trees, half-space intersection, convex hulls
-- `scikit-image` — marching cubes for the voxel shell fallback
-- `networkx`, `tqdm` — graph utilities and progress bars
+- `networkx`, `rtree` — required by trimesh for face-adjacency graphs and
+  proximity queries
+- `tqdm` — progress bars
 
 ## Usage
 

@@ -17,7 +17,6 @@ dependencies = [
     "scipy>=1.11",
     "tqdm>=4.66",
     "networkx>=3.0",
-    "scikit-image>=0.22",
     "rtree>=1.0",
 ]
 
