@@ -290,6 +290,36 @@ def _tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return u, v
 
 
+def convex_hull_indices_in_tangent(
+    loop: Loop,
+    seed: np.ndarray,
+    seed_normal: np.ndarray,
+) -> np.ndarray | None:
+    """Return the indices (into `loop.positions`) of the convex-hull
+    vertices in the seed's 2D tangent plane.
+
+    Use this when the cell's home patch has no sharp-edge boundary — the
+    sphere, an organic blob. Taking the hull *indices* and pulling the
+    corresponding 3D surface positions avoids the orthogonal-tangent
+    round trip that `project_polygon_2d_to_surface` would otherwise do,
+    which on a curved patch foreshortens cell radii (R·sin(θ) instead of
+    R·θ) and visibly widens walls between adjacent holes.
+    """
+    if len(loop) < 3:
+        return None
+    u, v = _tangent_basis(np.asarray(seed_normal, dtype=float))
+    seed3 = np.asarray(seed, dtype=float)
+    rel = loop.positions - seed3
+    pts2d = np.column_stack([rel @ u, rel @ v])
+    try:
+        hull = ConvexHull(pts2d)
+    except (QhullError, ValueError):
+        return None
+    if len(hull.vertices) < 3:
+        return None
+    return hull.vertices  # CCW order
+
+
 def convex_polygon_2d_in_tangent(
     loop: Loop,
     seed: np.ndarray,

@@ -44,7 +44,9 @@ from voronoizer import progress
 from voronoizer.seeding import Seeds
 from voronoizer.surface_boundary import (
     Loop,
+    _smoothed_normals_at,
     bezier_smooth_on_surface,
+    convex_hull_indices_in_tangent,
     convex_polygon_2d_in_tangent,
     extract_cell_loops,
     inset_loop_on_surface,
@@ -268,15 +270,26 @@ def build_geodesic_cells(
             continue
         polygon_2d, u_basis, v_basis = poly
 
-        # Flat vs curved branch — see `surface_voronoi.patch_is_flat`.
-        # Flat (cube face): the orthogonal 2D tangent projection is exact,
-        # so the strut/2 inset can be done directly in 2D alongside the
-        # shell_thickness patch-boundary clip. Curved (sphere / fillet):
-        # the orthogonal projection foreshortens far-from-seed points,
-        # leaving cells too small and walls visibly too wide; instead we
-        # clip in 2D for the patch boundary only, project to the surface,
-        # and apply the strut/2 inset per-vertex on the surface so the
-        # geodesic strut width is correct.
+        # Three-branch dispatch on the cell's home patch:
+        #
+        #   flat (cube face): seed's tangent plane and the surface are
+        #     identical, so do everything (convex hull, strut/2 inset,
+        #     patch-boundary clip) in 2D.
+        #
+        #   curved with patch boundary (a fillet between two flat
+        #     regions): need the 2D patch-boundary clip to enforce
+        #     shell_thickness margin from the sharp edges, but the
+        #     strut/2 must be applied on the surface to avoid the
+        #     foreshortening that an orthogonal 2D inset would suffer.
+        #
+        #   curved with no patch boundary (sphere, organic blob): skip
+        #     the 2D round-trip entirely. Pick hull vertices in 2D for
+        #     selection only, then carry their ORIGINAL surface positions
+        #     into the surface-aware inset. This avoids the orthogonal
+        #     forward + on_surface backward composition that loses
+        #     ~R·(θ − arctan(sin θ)) of cell radius on curved patches
+        #     and that's what was making sphere walls visibly wider than
+        #     cube walls.
         patch_id = int(seed_patch[s_idx])
         flat = patch_is_flat(sub_mesh, face_comp, patch_id)
         patch_clip = _patch_clip_halfplanes(
@@ -295,9 +308,24 @@ def build_geodesic_cells(
             inset_loop = project_polygon_2d_to_surface(
                 inset_2d, seed, u_basis, v_basis, sub_mesh, proximity
             )
+        elif patch_clip is None:
+            # Curved with no patch boundary — sphere-like. Keep the
+            # hull vertices' ORIGINAL surface positions; no 2D round-trip.
+            hull_idx = convex_hull_indices_in_tangent(loop, seed, seed_normal)
+            if hull_idx is None or len(hull_idx) < 3:
+                stats.too_few_vertices += 1
+                continue
+            hull_loop = Loop(
+                positions=loop.positions[hull_idx],
+                face_ids=loop.face_ids[hull_idx],
+                normals=loop.normals[hull_idx],
+            )
+            inset_loop = inset_loop_on_surface(
+                hull_loop, sub_mesh, proximity, inset=inset_distance
+            )
         else:
-            # Curved: 2D patch clip only (no strut inset in 2D), then
-            # project back onto the surface, then surface-aware inset.
+            # Curved with patch boundary (fillet). 2D patch clip only,
+            # then project to surface, then surface-aware strut/2 inset.
             clipped_2d = _polygon_clip_and_inset(
                 polygon_2d,
                 strut_half=0.0,
