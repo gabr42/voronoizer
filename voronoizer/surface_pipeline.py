@@ -466,11 +466,17 @@ def build_geodesic_cells(
         cells.append(prism)
         stats.built += 1
 
-    progress.warn(
+    msg = (
         f"geodesic cells built: {stats.built} / {stats.requested} "
         f"(no-loop={stats.no_loop}, short={stats.too_few_vertices}, "
         f"prism-failed={stats.prism_failed})"
     )
+    # Warn loudly only if some cells didn't make it; otherwise the
+    # message is routine diagnostic and visible under --verbose.
+    if stats.built < stats.requested:
+        progress.warn(msg)
+    else:
+        progress.log(msg)
     return cells, stats
 
 

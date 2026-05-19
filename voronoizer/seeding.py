@@ -197,7 +197,7 @@ def sample_seeds_per_patch(
             seeds_per_patch[idx] += 1
             diff += 1
 
-    progress.warn(
+    progress.log(
         f"per-patch seeding: {n_patches} total patch(es), "
         f"{int(eligible.sum())} eligible (area > {min_patch_area:.2f} mm²), "
         f"{int((~eligible).sum())} skipped (too small). "
@@ -205,7 +205,7 @@ def sample_seeds_per_patch(
         f"requested count {count}."
     )
     # Per-patch area + allocation for diagnosis.
-    progress.warn(
+    progress.log(
         "patch areas / allocations: " + ", ".join(
             f"#{p}: {patch_area[p]:.1f} mm² → {int(seeds_per_patch[p])}"
             for p in range(n_patches)
@@ -266,7 +266,7 @@ def sample_seeds_per_patch(
         accepted_points.append(pts)
         accepted_normals.append(normals)
         actual_per_patch[p] = len(pts)
-    progress.warn(
+    progress.log(
         "actual seeds per patch after sampling: " + ", ".join(
             f"#{p}: {int(actual_per_patch[p])}"
             for p in range(n_patches) if seeds_per_patch[p] > 0

@@ -249,11 +249,18 @@ def run(
                 else:
                     keep.append(p)
             if dropped_count > 0:
-                progress.warn(
+                msg = (
                     f"dropped {dropped_count} disconnected leftover component(s) "
                     f"({dropped_vol:.3f} mm³ total) — artefacts of the boolean "
                     f"leaving slivers at fillet near-tangencies"
                 )
+                # Slivers under 1% of main_vol are routine numerical noise
+                # from manifold3d; only nag the user when something actually
+                # significant got dropped.
+                if main_vol > 0 and dropped_vol > 0.01 * main_vol:
+                    progress.warn(msg)
+                else:
+                    progress.log(msg)
             if len(keep) == 1:
                 perforated = keep[0]
             else:

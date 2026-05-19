@@ -543,7 +543,7 @@ def assign_cell_labels(
         d, idx = tree.query(centroids[unl])
         face_labels[unl] = idx.astype(np.int64)
         face_distances[unl] = d
-        progress.warn(
+        progress.log(
             f"geodesic: {int(unl.sum())} faces in patches without any seed "
             f"fell back to global nearest-seed assignment"
         )
