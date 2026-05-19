@@ -272,6 +272,28 @@ def build_geodesic_cells(
             stats.too_few_vertices += 1
             continue
 
+        # Filter loop to vertices whose surface normal is within ~60° of
+        # the seed's normal. This keeps the cell from "wrapping" around
+        # a feature (e.g. seed on the body's top face but loop reaching
+        # over a fillet onto the side): the side-face vertices end up
+        # very far in the seed's 2D tangent plane, so the convex hull
+        # becomes enormous and the seed-normal-extruded prism cuts a
+        # huge column of material from the adjacent face. Restricting
+        # the loop to seed-face-aligned vertices clips the cell to the
+        # local face vicinity. Sphere cells (normals all within ~21° of
+        # seed normal) are untouched by this filter.
+        if len(loop) > 0:
+            seed_n_arr = np.asarray(seed_normal, dtype=float)
+            seed_n_arr = seed_n_arr / max(float(np.linalg.norm(seed_n_arr)), 1e-12)
+            cos_with_seed = loop.normals @ seed_n_arr
+            face_aligned = cos_with_seed > 0.5  # within 60°
+            if face_aligned.sum() >= 3 and not face_aligned.all():
+                loop = Loop(
+                    positions=loop.positions[face_aligned],
+                    face_ids=loop.face_ids[face_aligned],
+                    normals=loop.normals[face_aligned],
+                )
+
         # Polygon construction in the seed's 2D tangent plane (Phase 1's
         # geometry, fed by the geodesic loop). Doing the inset + Bézier in
         # 2D avoids the surface-snap-back bug: a loop vertex on a cube
