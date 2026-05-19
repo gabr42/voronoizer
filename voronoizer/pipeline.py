@@ -219,6 +219,49 @@ def run(
     with progress.step("perforate shell"):
         perforated = perforate(shell, cells)
 
+    # Post-process: drop disconnected leftover components and fix
+    # face winding. On CAD bodies with small fillet radii relative to the
+    # shell thickness, the boolean leaves small pockets of wall material
+    # un-cut where the cell prism's per-vertex extrusion couldn't fully
+    # enclose the fillet's curved wall geometry. Those pockets become
+    # tiny disconnected components inside otherwise-correct holes —
+    # printable but visually wrong, and they trip up slicers that
+    # report them as separate solids. Keep only components whose volume
+    # is at least 1 % of the largest (which is always the main shell).
+    with progress.step("clean perforated output"):
+        before_faces = len(perforated.faces)
+        parts = perforated.split(only_watertight=False)
+        if len(parts) > 1:
+            parts = sorted(parts, key=lambda p: abs(p.volume), reverse=True)
+            main = parts[0]
+            main_vol = abs(main.volume)
+            keep = [main] + [
+                p for p in parts[1:] if abs(p.volume) >= 0.01 * main_vol
+            ]
+            dropped = len(parts) - len(keep)
+            if dropped > 0:
+                dropped_vol = sum(
+                    abs(p.volume) for p in parts[1:] if abs(p.volume) < 0.01 * main_vol
+                )
+                progress.warn(
+                    f"dropped {dropped} disconnected leftover component(s) "
+                    f"({dropped_vol:.3f} mm³ total) — artefacts of the "
+                    f"boolean leaving material un-cut at fillets"
+                )
+            if len(keep) == 1:
+                perforated = keep[0]
+            else:
+                perforated = trimesh.util.concatenate(keep)
+        # Re-orient faces so normals point consistently outward. Manifold3d
+        # occasionally emits faces with flipped winding which slicers then
+        # report as "facets reversed".
+        perforated.fix_normals()
+        if len(perforated.faces) != before_faces:
+            progress.log(
+                f"perforated: {before_faces} → {len(perforated.faces)} faces "
+                f"after cleanup"
+            )
+
     with progress.step("write STL"):
         save_stl(perforated, output_path)
 
