@@ -16,7 +16,7 @@ from voronoizer.mirror_seeds import (
     compute_sharp_edge_twins,
 )
 from voronoizer.perforate import perforate
-from voronoizer.seeding import Seeds, sample_seeds
+from voronoizer.seeding import Seeds, sample_seeds, sample_seeds_per_patch
 from voronoizer.shell import build_shell
 from voronoizer.surface_pipeline import build_geodesic_cells
 from voronoizer.voronoi_cells import build_shrunken_cells
@@ -111,23 +111,38 @@ def run(
 
     # Sharp-edge handling differs by engine:
     #   - tangent uses --soft-edge-angle to REJECT seeds near sharp edges.
-    #   - geodesic uses --soft-edge-angle as a Dijkstra COST BARRIER, so
-    #     cells naturally stay within smooth patches; seed rejection is
-    #     unnecessary and would just throw away usable seed locations.
-    seed_sharp_angle_deg = (
-        soft_edge_angle_deg if engine == "tangent" else 179.0
-    )
-    with progress.step("sample seed points"):
-        seeds = sample_seeds(
-            mesh=mesh,
-            count=holes,
-            top_bottom_only=top_bottom_only,
-            angle_deg=normal_angle_deg,
-            rng=rng,
-            strut_thickness=strut_thickness,
-            edge_margin=edge_margin,
-            sharp_edge_angle_deg=seed_sharp_angle_deg,
-        )
+    #     Sampling is plain Poisson-disk on the whole surface; sharp-edge
+    #     rejection then filters out candidates near sharp edges.
+    #   - geodesic uses --soft-edge-angle to partition the mesh into smooth
+    #     patches. Seeds are distributed PER PATCH (proportional to patch
+    #     area, minimum one per patch). The per-patch Voronoi labelling
+    #     requires every smooth patch to have at least one seed; plain
+    #     Poisson on the whole surface routinely leaves small patches
+    #     unseeded, which forced 3D-Euclidean fallback assignments and
+    #     produced broken cells that span patch boundaries.
+    if engine == "tangent":
+        with progress.step("sample seed points"):
+            seeds = sample_seeds(
+                mesh=mesh,
+                count=holes,
+                top_bottom_only=top_bottom_only,
+                angle_deg=normal_angle_deg,
+                rng=rng,
+                strut_thickness=strut_thickness,
+                edge_margin=edge_margin,
+                sharp_edge_angle_deg=soft_edge_angle_deg,
+            )
+    else:
+        with progress.step("sample seed points (per patch)"):
+            seeds = sample_seeds_per_patch(
+                mesh=mesh,
+                count=holes,
+                top_bottom_only=top_bottom_only,
+                angle_deg=normal_angle_deg,
+                rng=rng,
+                strut_thickness=strut_thickness,
+                sharp_edge_angle_deg=soft_edge_angle_deg,
+            )
 
     # Mesh to use for edge analysis: the same one sample_seeds drew from
     # (a submesh in --top-bottom-only mode, otherwise the full mesh).
