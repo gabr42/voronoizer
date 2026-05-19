@@ -45,10 +45,9 @@ from voronoizer.seeding import Seeds
 from voronoizer.surface_boundary import (
     Loop,
     bezier_smooth_on_surface,
-    convexify_loop_in_tangent,
-    dedupe_loop,
+    convex_polygon_2d_in_tangent,
     extract_cell_loops,
-    inset_loop_on_surface,
+    project_polygon_2d_to_surface,
     resample_loop_arclen,
 )
 from voronoizer.surface_prism import build_prism_from_loop
@@ -57,7 +56,12 @@ from voronoizer.surface_voronoi import (
     face_labels_from_vertex_labels,
     subdivide_for_geodesic,
 )
-from voronoizer.voronoi_cells import _estimate_local_radius
+from voronoizer.voronoi_cells import (
+    _BEZIER_SAMPLES_PER_EDGE,
+    _bezier_smooth,
+    _estimate_local_radius,
+    _inset_polygon_2d,
+)
 
 
 @dataclass
@@ -153,25 +157,45 @@ def build_geodesic_cells(
         if len(loop) < 3:
             stats.too_few_vertices += 1
             continue
-        # Convex-hull in the seed's tangent plane: enforces the convex-hole
-        # look users expect from a Voronoi pattern. With sharp-edge barriers
-        # in Stage 2, each cell sits on a smooth patch where the tangent
-        # projection is faithful, so we lose almost no real geometry — just
-        # iron out the small concavities introduced by Dijkstra-on-discrete-
-        # edges and Bézier resampling.
-        loop = convexify_loop_in_tangent(
-            loop, seed, seed_normal, sub_mesh, proximity
-        )
-        if len(loop) < 3:
+
+        # Polygon construction in the seed's 2D tangent plane (Phase 1's
+        # geometry, fed by the geodesic loop). Doing the inset + Bézier in
+        # 2D avoids the surface-snap-back bug: a loop vertex on a cube
+        # edge, inset in 3D and re-projected via on_surface, lands right
+        # back on the edge — leaving zero margin for the corner wall and
+        # causing adjacent-face cells to eat into shared corner material.
+        # In 2D tangent the inset shrinks the polygon by `strut/2`
+        # unconditionally; surface projection happens only once, after
+        # smoothing, when the final 2D polygon is lifted to the mesh.
+        poly = convex_polygon_2d_in_tangent(loop, seed, seed_normal)
+        if poly is None:
             stats.too_few_vertices += 1
             continue
-        loop = bezier_smooth_on_surface(loop, sub_mesh, proximity)
-        loop = inset_loop_on_surface(loop, sub_mesh, proximity, inset=inset_distance)
-        # Drop near-duplicate vertices that Bézier + inset can leave behind
-        # near sharp edges (segments as short as 0.004 mm on a cube).
-        # Threshold is 5 % of the resample step — generous enough to clean
-        # actual slivers without removing meaningful geometry.
-        loop = dedupe_loop(loop, sub_mesh, min_segment_length=resample_step * 0.05)
+        polygon_2d, u_basis, v_basis = poly
+
+        # Inset in 2D — strut/2 shrinkage is geometrically exact and
+        # respects patch-boundary cube edges (which `inset_loop_on_surface`
+        # botched because re-projection snaps inset points back onto the
+        # boundary edge).
+        centroid = polygon_2d.mean(axis=0)
+        inset_2d = _inset_polygon_2d(polygon_2d, inset_distance, centroid)
+        if inset_2d is None or len(inset_2d) < 3:
+            stats.too_few_vertices += 1
+            continue
+        # Lift the inset 2D polygon back onto the surface (one snap per
+        # corner). On a flat cube face this is identity; on a sphere the
+        # corners land on the sphere.
+        inset_loop = project_polygon_2d_to_surface(
+            inset_2d, seed, u_basis, v_basis, sub_mesh, proximity
+        )
+        if len(inset_loop) < 3:
+            stats.too_few_vertices += 1
+            continue
+        # Bézier smoothing ON THE SURFACE — each sample is snapped to the
+        # mesh, so curved surfaces (sphere, fillet) keep their cells
+        # genuinely on-surface rather than as 2D shadows of a tangent
+        # polygon. On a flat face the snap is identity.
+        loop = bezier_smooth_on_surface(inset_loop, sub_mesh, proximity)
         if len(loop) < 3:
             stats.too_few_vertices += 1
             continue

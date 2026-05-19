@@ -290,30 +290,30 @@ def _tangent_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return u, v
 
 
-def convexify_loop_in_tangent(
+def convex_polygon_2d_in_tangent(
     loop: Loop,
     seed: np.ndarray,
     seed_normal: np.ndarray,
-    mesh: trimesh.Trimesh,
-    proximity,
-) -> Loop:
-    """Project the loop into the seed's tangent plane, take its 2D convex
-    hull, then re-project the hull vertices back onto the surface.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Project the loop into the seed's tangent plane and take its 2D
+    convex hull.
 
-    Phase 1 produces convex holes by construction (each cell is a 2D
-    half-plane intersection in the seed's tangent frame). Phase 2's raw
-    geodesic boundary can be non-convex when projected to the same tangent
-    frame — discrete mesh edges, Dijkstra approximation, and Bézier sampling
-    all introduce small wobbles that read as visible concavities in the
-    final hole.
+    Returns `(polygon_2d, u, v)` where `polygon_2d` is shape (M, 2) in the
+    seed's tangent frame (CCW), and `u, v` is the orthonormal basis used
+    for the projection. Returns `None` if the projection / hull fails
+    (degenerate cell, fewer than 3 unique points, etc.).
 
-    Forcing convexity in the tangent plane gives the look users expect from
-    a Voronoi pattern, with negligible loss of surface accuracy: cells stay
-    within their smooth patch (Approach A's sharp-edge barriers ensure this
-    on faceted inputs), so the tangent-plane projection is faithful.
+    The 2D polygon is the input for `_inset_polygon_2d` and the 2D Bézier
+    smoothing pass downstream — keeping the inset + smoothing in 2D avoids
+    the surface-projection snap-back issue that plagued the earlier
+    `inset_loop_on_surface` approach: a loop vertex sitting on a cube
+    edge has its inset displacement pointing off the home face, and
+    re-projection to "the closest mesh point" lands right back on the
+    cube edge with zero gap. In 2D tangent space the inset works
+    correctly regardless of how close the loop is to the patch boundary.
     """
-    if len(loop) < 4:
-        return loop
+    if len(loop) < 3:
+        return None
     u, v = _tangent_basis(np.asarray(seed_normal, dtype=float))
     seed3 = np.asarray(seed, dtype=float)
     rel = loop.positions - seed3
@@ -321,22 +321,45 @@ def convexify_loop_in_tangent(
     try:
         hull = ConvexHull(pts2d)
     except (QhullError, ValueError):
-        return loop
+        return None
     if len(hull.vertices) < 3:
-        return loop
-    # ConvexHull.vertices is CCW for 2D, which matches our loop convention
-    # (cell on the left of walking direction). Keep the original positions,
-    # face_ids and normals for the selected vertices — re-projecting via
-    # on_surface can flip face_ids at cube edges (the closest surface point
-    # of an edge-vertex is on whichever face wins the proximity tie), which
-    # would put the prism's per-vertex normal on the *neighbouring* face
-    # and pull the cell across the sharp dihedral the barriers were
-    # supposed to keep it away from.
-    keep = hull.vertices
+        return None
+    # ConvexHull.vertices is in CCW order for 2D, matching our loop
+    # walking convention (cell on the left).
+    return pts2d[hull.vertices], u, v
+
+
+def project_polygon_2d_to_surface(
+    polygon_2d: np.ndarray,
+    seed: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    mesh: trimesh.Trimesh,
+    proximity,
+    seed_face_id: int | None = None,
+) -> Loop:
+    """Lift a 2D polygon (in tangent frame `(u, v)`) back onto the mesh.
+
+    For each 2D point we form the 3D position `seed + x·u + y·v` and snap
+    to the closest mesh surface point. The 3D positions, face_ids, and
+    smoothed normals are wrapped in a `Loop` for the prism builder.
+
+    `seed_face_id` is currently unused but kept in the signature for a
+    future enhancement: restrict the proximity query to faces in the
+    seed's patch only, eliminating the rare case where a 2D point near
+    the patch boundary snaps to a neighbouring patch (and pulls the
+    cell's normal there).
+    """
+    _ = seed_face_id
+    seed3 = np.asarray(seed, dtype=float)
+    p3d = seed3 + polygon_2d[:, 0:1] * u + polygon_2d[:, 1:2] * v
+    snapped, _dist, face_ids = proximity.on_surface(p3d)
+    snapped = np.asarray(snapped, dtype=float)
+    face_ids = np.asarray(face_ids, dtype=np.int64)
     return Loop(
-        positions=loop.positions[keep],
-        face_ids=loop.face_ids[keep],
-        normals=loop.normals[keep],
+        positions=snapped,
+        face_ids=face_ids,
+        normals=_smoothed_normals_at(mesh, snapped, face_ids),
     )
 
 
