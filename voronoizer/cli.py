@@ -48,12 +48,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
-        "--edge-margin",
-        type=float, default=None,
-        help="Min distance (mm) seeds must keep from sharp mesh edges. "
-             "Default: auto-scaled from seed density.",
-    )
-    p.add_argument(
         "--chamfer",
         type=float, default=0.0,
         help="Chamfer distance (mm) for OUTER hole edges where they meet the "
@@ -74,31 +68,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--soft-edge-angle",
         type=float, default=25.0,
         help="Dihedral angle (deg) above which mesh edges count as 'sharp'. "
-             "Tangent engine: seeds within --edge-margin of a sharp edge "
-             "are rejected. Geodesic engine: sharp edges act as Dijkstra "
-             "barriers so Voronoi cells stay within smooth patches "
-             "(no hole wraps a cube corner). Default 25 deg works for "
-             "boxy / faceted models with crisp edges. Lower it (e.g. 10) "
-             "for CAD-like models with smooth fillets — that lets each "
-             "fillet count as a 'sharp' boundary and keeps holes cleanly "
-             "on the flat surfaces it separates.",
-    )
-    p.add_argument(
-        "--engine",
-        choices=("geodesic", "tangent"),
-        default="geodesic",
-        help="Voronoi tessellation engine. geodesic (default): cell "
-             "boundaries follow the actual mesh surface; robust on CAD "
-             "models with fillets and on low-poly inputs. tangent: "
-             "Phase 1 tangent-plane Voronoi, kept for regression and "
-             "special cases.",
+             "Sharp edges partition the surface into smooth patches; seeds "
+             "are distributed per patch and Voronoi cell boundaries follow "
+             "patch boundaries (no hole wraps a cube corner). Default 25 "
+             "deg works for boxy / faceted models with crisp edges. Lower "
+             "it (e.g. 10) for CAD-like models with smooth fillets so each "
+             "fillet counts as a patch boundary and holes land cleanly on "
+             "the flat surfaces it separates.",
     )
     p.add_argument(
         "--target-edge-length",
         type=float, default=None,
-        help="Geodesic engine only: subdivide the input mesh until all "
-             "edges are at most this long (mm). Default: strut/2. Lower "
-             "values give finer boundaries but cost faces (capped at 500k).",
+        help="Subdivide the input mesh until all edges are at most this "
+             "long (mm) before tessellating. Default: strut/2. Lower "
+             "values give finer cell boundaries but cost faces (capped "
+             "at 500k).",
     )
 
     p.add_argument(
@@ -189,13 +173,11 @@ def main(argv: list[str] | None = None) -> int:
             normal_angle_deg=args.normal_angle,
             seed=args.seed,
             repair=args.repair,
-            edge_margin=args.edge_margin,
             chamfer=args.chamfer,
             chamfer_inner=args.inner_chamfer,
             soft_edge_angle_deg=args.soft_edge_angle,
             shell_only=args.shell,
             cutters_only=args.cutters,
-            engine=args.engine,
             target_edge_length=args.target_edge_length,
         )
     except Exception as e:

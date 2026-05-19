@@ -1,4 +1,4 @@
-"""Regression sweep across (fixture x engine x chamfer).
+"""Regression sweep across (fixture × chamfer).
 
 Runs the voronoizer CLI on each combination and checks that the output
 mesh is sane: loads, is watertight (or close to it), has positive volume,
@@ -36,7 +36,6 @@ SEED = 613805311  # the seed from the last user-reported Unnamed-Body run
 class Case:
     name: str
     fixture: Path
-    engine: str
     chamfer: float
     holes: int
     strut: float = 1.5
@@ -50,40 +49,34 @@ class Case:
 
 def build_matrix(quick: bool) -> list[Case]:
     cases: list[Case] = []
-    # (name, fixture, holes, strut, thickness, geodesic_target_edge_length)
-    boxy = [
+    # (name, fixture, holes, strut, thickness, target_edge_length)
+    fixtures = [
         ("cube_100mm", DATA / "cube_100mm.stl", 30, 1.5, 2.0, 4.0),
-    ]
-    curved = [
         ("sphere_r50mm", DATA / "sphere_r50mm.stl", 30, 1.5, 2.0, None),
         # cyl_r30_h120mm caps are a 64-spoke fan with 30 mm radii — target
         # has to leave room to subdivide those long spokes under the cap.
         ("cyl_r30_h120mm", DATA / "cyl_r30_h120mm.stl", 30, 1.5, 2.0, 8.0),
-    ]
-    cad = [
         ("shape_box", ROOT / "Shape-Box.stl", 20, 1.5, 2.0, None),
     ]
     if not quick:
-        cad.append(("unnamed_body", ROOT / "Unnamed-Body.stl", 30, 1.5, 2.0, None))
-    for group in (boxy, curved, cad):
-        for name, fixture, n, strut, t, tel in group:
-            for engine in ("tangent", "geodesic"):
-                for chamfer in (0.0, 0.6):
-                    cases.append(Case(
-                        name=f"{name}_{engine}_ch{chamfer}",
-                        fixture=fixture,
-                        engine=engine,
-                        chamfer=chamfer,
-                        holes=n,
-                        strut=strut,
-                        thickness=t,
-                        target_edge_length=tel if engine == "geodesic" else None,
-                    ))
-    # Asymmetric inner-chamfer = 0 with outer = 0.6 (geodesic only).
+        fixtures.append(
+            ("unnamed_body", ROOT / "Unnamed-Body.stl", 30, 1.5, 2.0, None)
+        )
+    for name, fixture, n, strut, t, tel in fixtures:
+        for chamfer in (0.0, 0.6):
+            cases.append(Case(
+                name=f"{name}_ch{chamfer}",
+                fixture=fixture,
+                chamfer=chamfer,
+                holes=n,
+                strut=strut,
+                thickness=t,
+                target_edge_length=tel,
+            ))
+    # Asymmetric inner-chamfer = 0 with outer = 0.6.
     cases.append(Case(
-        name="cube_100mm_geodesic_outer-only-chamfer",
+        name="cube_100mm_outer-only-chamfer",
         fixture=DATA / "cube_100mm.stl",
-        engine="geodesic",
         chamfer=0.6,
         holes=30,
         target_edge_length=4.0,
@@ -93,7 +86,6 @@ def build_matrix(quick: bool) -> list[Case]:
     cases.append(Case(
         name="cube_100mm_shell-only",
         fixture=DATA / "cube_100mm.stl",
-        engine="geodesic",
         chamfer=0.0,
         holes=30,
         target_edge_length=4.0,
@@ -103,7 +95,6 @@ def build_matrix(quick: bool) -> list[Case]:
     cases.append(Case(
         name="cube_100mm_cutters-only",
         fixture=DATA / "cube_100mm.stl",
-        engine="geodesic",
         chamfer=0.0,
         holes=30,
         target_edge_length=4.0,
@@ -134,7 +125,6 @@ def run_case(case: Case, tmpdir: Path) -> Result:
         "-s", str(case.strut),
         "-t", str(case.thickness),
         "--chamfer", str(case.chamfer),
-        "--engine", case.engine,
     ]
     if case.target_edge_length is not None:
         cmd += ["--target-edge-length", str(case.target_edge_length)]
