@@ -213,6 +213,63 @@ def _face_components(
     return comp.astype(np.int64)
 
 
+def patch_boundary_vertex_indices(
+    mesh: trimesh.Trimesh, face_components: np.ndarray, comp_id: int
+) -> np.ndarray:
+    """Mesh vertex indices on the boundary of patch `comp_id`.
+
+    Boundary = mesh edges where one adjacent face is in the patch and the
+    other is in a different patch (or the edge is on the open mesh
+    boundary, in which case the single adjacent face is in this patch).
+
+    Used downstream to compute 2D clipping half-planes: a cell's tangent
+    polygon must stay at least `shell_thickness` away from these boundary
+    vertices, otherwise the cell's inner ring extends into the adjacent
+    patch's wall material and the boolean subtraction "eats" the
+    neighbouring face's shell.
+    """
+    F = mesh.faces
+    fa = mesh.face_adjacency
+    fa_edges = mesh.face_adjacency_edges
+
+    boundary_v: set[int] = set()
+    for (f0, f1), (va, vb) in zip(fa, fa_edges):
+        c0 = int(face_components[f0])
+        c1 = int(face_components[f1])
+        if (c0 == comp_id) != (c1 == comp_id):
+            boundary_v.add(int(va))
+            boundary_v.add(int(vb))
+
+    NF = len(F)
+    if NF > 0:
+        edges = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+        face_per_edge = np.repeat(np.arange(NF), 3)
+        edges_sorted = np.sort(edges, axis=1)
+        unique, inv, counts = np.unique(
+            edges_sorted, axis=0, return_inverse=True, return_counts=True
+        )
+        boundary_unique_idx = np.where(counts == 1)[0]
+        for u_idx in boundary_unique_idx:
+            first = int(np.where(inv == u_idx)[0][0])
+            f = int(face_per_edge[first])
+            if int(face_components[f]) == comp_id:
+                boundary_v.add(int(unique[u_idx, 0]))
+                boundary_v.add(int(unique[u_idx, 1]))
+
+    return np.array(sorted(boundary_v), dtype=np.int64)
+
+
+def face_components(
+    mesh: trimesh.Trimesh, sharp_angle_deg: float
+) -> np.ndarray:
+    """Public wrapper for `_face_components` so callers outside this
+    module (e.g. the pipeline orchestrator) can compute the partition
+    once and pass it around without recomputing it inside
+    `assign_cell_labels`.
+    """
+    return _face_components(mesh, sharp_angle_deg)
+
+
 def _build_component_adjacency(
     mesh: trimesh.Trimesh, face_components: np.ndarray, comp_id: int
 ) -> dict[int, list[tuple[int, float]]]:

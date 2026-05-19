@@ -53,7 +53,9 @@ from voronoizer.surface_boundary import (
 from voronoizer.surface_prism import build_prism_from_loop
 from voronoizer.surface_voronoi import (
     assign_cell_labels,
+    face_components as compute_face_components,
     face_labels_from_vertex_labels,
+    patch_boundary_vertex_indices,
     subdivide_for_geodesic,
 )
 from voronoizer.voronoi_cells import (
@@ -62,6 +64,85 @@ from voronoizer.voronoi_cells import (
     _estimate_local_radius,
     _inset_polygon_2d,
 )
+
+
+from scipy.spatial import ConvexHull, HalfspaceIntersection
+try:
+    from scipy.spatial import QhullError
+except ImportError:
+    from scipy.spatial.qhull import QhullError
+
+
+def _polygon_clip_and_inset(
+    polygon_2d: np.ndarray,
+    strut_half: float,
+    patch_clip_eqs: np.ndarray | None,
+    shell_thickness: float,
+) -> np.ndarray | None:
+    """Inset the cell polygon by `strut_half` AND clip to the patch
+    boundary inset by `shell_thickness`, in a single HalfspaceIntersection
+    pass.
+
+    Returns CCW vertices of the resulting convex polygon, or None if the
+    inset eats it to nothing.
+    """
+    if len(polygon_2d) < 3:
+        return None
+    try:
+        hull = ConvexHull(polygon_2d)
+    except (QhullError, ValueError):
+        return None
+    cell_eqs = hull.equations.copy()
+    cell_eqs[:, 2] += strut_half
+    if patch_clip_eqs is not None and len(patch_clip_eqs) > 0:
+        clip_eqs = patch_clip_eqs.copy()
+        clip_eqs[:, 2] += shell_thickness
+        all_eqs = np.vstack([cell_eqs, clip_eqs])
+    else:
+        all_eqs = cell_eqs
+    interior = polygon_2d.mean(axis=0)
+    try:
+        hsi = HalfspaceIntersection(all_eqs, interior)
+    except (QhullError, ValueError):
+        return None
+    pts = np.asarray(hsi.intersections)
+    if len(pts) < 3:
+        return None
+    try:
+        h = ConvexHull(pts)
+    except (QhullError, ValueError):
+        return None
+    return pts[h.vertices]
+
+
+def _patch_clip_halfplanes(
+    mesh: trimesh.Trimesh,
+    face_comp: np.ndarray,
+    comp_id: int,
+    seed: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+) -> np.ndarray | None:
+    """Half-plane constraints (M, 3) in 2D tangent (u, v) frame from the
+    convex hull of the patch's boundary vertices, projected to tangent
+    coords relative to `seed`.
+
+    Returns None when the patch has no boundary (closed mesh component
+    with no sharp edges — e.g. a sphere). The constraints are in
+    `HalfspaceIntersection` format `(A_x, A_y, c)` with `A·x + c ≤ 0`,
+    *before* applying the shell-thickness inset margin; the caller adds
+    that to the `c` term.
+    """
+    boundary_vs = patch_boundary_vertex_indices(mesh, face_comp, comp_id)
+    if len(boundary_vs) < 3:
+        return None
+    rel = mesh.vertices[boundary_vs] - seed
+    pts2d = np.column_stack([rel @ u, rel @ v])
+    try:
+        hull = ConvexHull(pts2d)
+    except (QhullError, ValueError):
+        return None
+    return hull.equations.copy()
 
 
 @dataclass
@@ -96,6 +177,11 @@ def build_geodesic_cells(
     ):
         sub_mesh = subdivide_for_geodesic(mesh, target_edge_length)
 
+    # Pre-compute face components once and reuse: assign_cell_labels needs
+    # them for the per-patch Dijkstra, and the per-cell loop downstream
+    # needs them to look up patch-boundary clipping half-planes.
+    face_comp = compute_face_components(sub_mesh, sharp_angle_deg)
+
     # Stage 2 — Dijkstra with sharp-edge barriers (Approach A). Edges whose
     # dihedral angle exceeds `sharp_angle_deg` get a high cost multiplier
     # so Voronoi cells stay within smooth patches (one cube face, one
@@ -106,6 +192,13 @@ def build_geodesic_cells(
             sub_mesh, seeds.points, sharp_angle_deg=sharp_angle_deg
         )
         face_labels = face_labels_from_vertex_labels(sub_mesh, labels)
+
+    # For each seed, find which patch it sits on (used downstream to look
+    # up patch-boundary clip half-planes).
+    from trimesh.proximity import ProximityQuery as _PQ
+    _pq_for_patch = _PQ(sub_mesh)
+    _, _, seed_face_for_patch = _pq_for_patch.on_surface(seeds.points)
+    seed_patch = face_comp[np.asarray(seed_face_for_patch, dtype=int)]
 
     # Stage 3 — extract closed boundary loops per cell.
     with progress.step("geodesic: extract boundary loops"):
@@ -176,9 +269,22 @@ def build_geodesic_cells(
         # Inset in 2D — strut/2 shrinkage is geometrically exact and
         # respects patch-boundary cube edges (which `inset_loop_on_surface`
         # botched because re-projection snaps inset points back onto the
-        # boundary edge).
-        centroid = polygon_2d.mean(axis=0)
-        inset_2d = _inset_polygon_2d(polygon_2d, inset_distance, centroid)
+        # boundary edge). We also clip the polygon by the patch boundary
+        # inset by `shell_thickness`: that keeps the cell's inner ring
+        # within the patch's inner-wall area on a cube and prevents the
+        # prism from eating into adjacent faces' shell material near
+        # corners. For closed-component patches (sphere, fillet) the clip
+        # is a no-op (no patch boundary to clip against).
+        patch_id = int(seed_patch[s_idx])
+        patch_clip = _patch_clip_halfplanes(
+            sub_mesh, face_comp, patch_id, seed, u_basis, v_basis
+        )
+        inset_2d = _polygon_clip_and_inset(
+            polygon_2d,
+            strut_half=inset_distance,
+            patch_clip_eqs=patch_clip,
+            shell_thickness=shell_thickness,
+        )
         if inset_2d is None or len(inset_2d) < 3:
             stats.too_few_vertices += 1
             continue
