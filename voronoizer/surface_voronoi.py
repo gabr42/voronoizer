@@ -358,22 +358,34 @@ def assign_cell_labels(
     sharp_angle_deg: float = 25.0,
     sharp_multiplier: float = _SHARP_EDGE_COST_MULT,
 ) -> GeodesicLabels:
-    """Per-face Voronoi labelling via component-restricted Dijkstra.
+    """Per-face Voronoi labelling by component-restricted Euclidean
+    nearest-seed.
 
     The mesh is partitioned into smooth patches by `_face_components` —
     each patch is a maximal set of faces connected through dihedral angles
-    ≤ `sharp_angle_deg`. For every patch we run multi-source Dijkstra
-    over only the patch's faces, with seeds whose closest mesh face is in
-    that patch as the sources. Faces in patches that contain no seed get
-    a fallback label from the spatially-closest seed (Euclidean), so the
-    labelling stays defined everywhere.
+    ≤ `sharp_angle_deg`. For every face we assign the label of the
+    geodesically-closest seed *within that face's patch*, approximated by
+    3D Euclidean distance from the face centroid to each in-patch seed.
 
-    The `sharp_multiplier` argument is accepted for API stability; with
-    the component-restricted graph the barrier is implicit (cross-patch
-    edges are simply absent from the adjacency), so the multiplier is
-    unused.
+    Why not edge-graph Dijkstra: on a regular triangulated grid the
+    in-mesh graph has 4 axis-aligned edges plus 2 diagonal edges per
+    vertex, with the diagonals running in only ONE direction. Shortest
+    paths in that graph collapse toward Manhattan distance whenever the
+    target is in the orientation the diagonals don't help with — biasing
+    Voronoi cells by ~35 % on sparse seedings. For a flat patch (a cube
+    face) 3D Euclidean from a face centroid equals the true 2D in-plane
+    distance, so it's exact. For curved patches (sphere, fillet) the
+    Euclidean approximation is within the cell-radius / patch-radius
+    error band, comparable to Phase 1's tangent-plane approximation.
+
+    Faces in patches that contain no seed at all fall back to the
+    nearest seed by 3D Euclidean from any patch — keeps the labelling
+    defined everywhere.
+
+    The `sharp_multiplier` argument is accepted for API compatibility
+    but is unused; the patch decomposition is the actual barrier.
     """
-    _ = sharp_multiplier  # kept for API stability
+    _ = sharp_multiplier
     if len(seed_points) == 0:
         raise ValueError(
             "surface_voronoi.assign_cell_labels: no seeds supplied"
@@ -391,6 +403,7 @@ def assign_cell_labels(
 
     # Snap each seed onto the mesh; record landing face and patch.
     from trimesh.proximity import ProximityQuery
+    from scipy.spatial import cKDTree
     pq = ProximityQuery(mesh)
     closest, _dist, seed_face_ids = pq.on_surface(seed_points)
     seed_face_ids = np.asarray(seed_face_ids, dtype=int)
@@ -401,6 +414,8 @@ def assign_cell_labels(
     face_labels = np.full(NF, -1, dtype=np.int64)
     face_distances = np.full(NF, INF, dtype=np.float64)
 
+    centroids = mesh.vertices[mesh.faces].mean(axis=1)
+
     seeds_by_comp: dict[int, list[int]] = {}
     for s_idx in range(N_seeds):
         seeds_by_comp.setdefault(int(seed_comp[s_idx]), []).append(s_idx)
@@ -409,55 +424,26 @@ def assign_cell_labels(
         comp_seeds = seeds_by_comp.get(comp_id, [])
         if not comp_seeds:
             continue
-        # Restricted adjacency: only edges within this patch.
-        adj = _build_component_adjacency(mesh, face_components, comp_id)
-        # Per-vertex (label, distance) for vertices reachable in this patch.
-        v_dist: dict[int, float] = {}
-        v_label: dict[int, int] = {}
-        heap: list[tuple[float, int, int]] = []
-        for s_idx in comp_seeds:
-            f = int(seed_face_ids[s_idx])
-            cp = closest[s_idx]
-            for v_idx in mesh.faces[f]:
-                v_i = int(v_idx)
-                d0 = float(np.linalg.norm(mesh.vertices[v_i] - cp))
-                heapq.heappush(heap, (d0, v_i, s_idx))
-        while heap:
-            d, v, s = heapq.heappop(heap)
-            if v in v_dist and d >= v_dist[v]:
-                continue
-            v_dist[v] = d
-            v_label[v] = s
-            for nb, L in adj.get(v, ()):
-                nd = d + L
-                if nb not in v_dist or nd < v_dist[nb]:
-                    heapq.heappush(heap, (nd, nb, s))
-        # Project to face labels for faces in this patch.
         comp_faces = _faces_in_component(face_components, comp_id)
-        for f in comp_faces:
-            fv = mesh.faces[f]
-            best_d = INF; best_l = -1
-            for v_i in fv:
-                v_i = int(v_i)
-                if v_i in v_dist and v_dist[v_i] < best_d:
-                    best_d = v_dist[v_i]
-                    best_l = v_label[v_i]
-            face_labels[f] = best_l
-            face_distances[f] = best_d
+        if len(comp_faces) == 0:
+            continue
+        seed_idx_arr = np.asarray(comp_seeds, dtype=np.int64)
+        seed_pts = closest[seed_idx_arr]
+        tree = cKDTree(seed_pts)
+        d, local = tree.query(centroids[comp_faces])
+        face_labels[comp_faces] = seed_idx_arr[local]
+        face_distances[comp_faces] = d
 
-    # Fallback for patches with no seed: assign each unlabeled face to the
-    # spatially nearest seed (Euclidean distance from face centroid).
+    # Fallback for patches with no seed.
     unl = face_labels < 0
     if unl.any():
-        from scipy.spatial import cKDTree
         tree = cKDTree(seed_points)
-        centroids = mesh.vertices[mesh.faces[unl]].mean(axis=1)
-        _, idx = tree.query(centroids)
+        d, idx = tree.query(centroids[unl])
         face_labels[unl] = idx.astype(np.int64)
-        # Distances are left INF for these — they're not strictly geodesic.
+        face_distances[unl] = d
         progress.warn(
             f"geodesic: {int(unl.sum())} faces in patches without any seed "
-            f"fell back to Euclidean nearest-seed assignment"
+            f"fell back to global nearest-seed assignment"
         )
 
     return GeodesicLabels(
