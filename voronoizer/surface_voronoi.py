@@ -142,50 +142,75 @@ def face_components(
     return comp.astype(np.int64)
 
 
-def patch_boundary_vertex_indices(
-    mesh: trimesh.Trimesh, face_comp: np.ndarray, comp_id: int
-) -> np.ndarray:
-    """Mesh vertex indices on the boundary of patch `comp_id`.
+def patch_boundary_vertices_by_id(
+    mesh: trimesh.Trimesh, face_comp: np.ndarray
+) -> dict[int, np.ndarray]:
+    """One-shot per-patch boundary vertex lookup.
 
-    Boundary = mesh edges where one adjacent face is in the patch and the
-    other is in a different patch (or the edge is on the open mesh
-    boundary, in which case the single adjacent face is in this patch).
+    For every patch, finds the mesh vertices on its boundary — i.e. on
+    edges where one adjacent face is in the patch and the other is in a
+    different patch, or on open mesh-boundary edges whose single
+    adjacent face is in the patch.
 
     Used downstream to compute 2D clipping half-planes: a cell's tangent
     polygon must stay at least `shell_thickness` away from these boundary
     vertices, otherwise the cell's inner ring extends into the adjacent
     patch's wall material and the boolean subtraction "eats" the
     neighbouring face's shell.
+
+    Returns `{patch_id: vertex_indices}` for every patch that has at
+    least one boundary vertex. Patches with no boundary (closed mesh
+    component, no sharp edges into other patches) are omitted.
     """
-    F = mesh.faces
+    n_patches = int(face_comp.max()) + 1 if len(face_comp) else 0
+    if n_patches == 0:
+        return {}
+
+    boundary_sets: list[set[int]] = [set() for _ in range(n_patches)]
+
+    # Cross-patch edges via face_adjacency: each such edge's two endpoints
+    # belong to the boundary of BOTH adjacent patches.
     fa = mesh.face_adjacency
     fa_edges = mesh.face_adjacency_edges
+    if len(fa) > 0:
+        c0 = face_comp[fa[:, 0]]
+        c1 = face_comp[fa[:, 1]]
+        cross = c0 != c1
+        if cross.any():
+            fa_cross = fa[cross]
+            fa_e_cross = fa_edges[cross]
+            for (f0, f1), (va, vb) in zip(fa_cross, fa_e_cross):
+                p0 = int(face_comp[f0])
+                p1 = int(face_comp[f1])
+                ia = int(va); ib = int(vb)
+                boundary_sets[p0].add(ia); boundary_sets[p0].add(ib)
+                boundary_sets[p1].add(ia); boundary_sets[p1].add(ib)
 
-    boundary_v: set[int] = set()
-    for (f0, f1), (va, vb) in zip(fa, fa_edges):
-        c0 = int(face_comp[f0])
-        c1 = int(face_comp[f1])
-        if (c0 == comp_id) != (c1 == comp_id):
-            boundary_v.add(int(va))
-            boundary_v.add(int(vb))
+    # Open mesh boundary edges (only one incident face) — single
+    # np.unique pass instead of one per patch. Skip entirely on watertight
+    # meshes since no edge can have count 1.
+    if not mesh.is_watertight:
+        F = mesh.faces
+        NF = len(F)
+        if NF > 0:
+            edges = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
+            face_per_edge = np.repeat(np.arange(NF), 3)
+            edges_sorted = np.sort(edges, axis=1)
+            _, inv, counts = np.unique(
+                edges_sorted, axis=0, return_inverse=True, return_counts=True
+            )
+            boundary_edge_idx = np.where(counts[inv] == 1)[0]
+            for ei in boundary_edge_idx:
+                f = int(face_per_edge[ei])
+                p = int(face_comp[f])
+                boundary_sets[p].add(int(edges[ei, 0]))
+                boundary_sets[p].add(int(edges[ei, 1]))
 
-    NF = len(F)
-    if NF > 0:
-        edges = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
-        face_per_edge = np.repeat(np.arange(NF), 3)
-        edges_sorted = np.sort(edges, axis=1)
-        unique, inv, counts = np.unique(
-            edges_sorted, axis=0, return_inverse=True, return_counts=True
-        )
-        boundary_unique_idx = np.where(counts == 1)[0]
-        for u_idx in boundary_unique_idx:
-            first = int(np.where(inv == u_idx)[0][0])
-            f = int(face_per_edge[first])
-            if int(face_comp[f]) == comp_id:
-                boundary_v.add(int(unique[u_idx, 0]))
-                boundary_v.add(int(unique[u_idx, 1]))
-
-    return np.array(sorted(boundary_v), dtype=np.int64)
+    return {
+        p: np.array(sorted(boundary_sets[p]), dtype=np.int64)
+        for p in range(n_patches)
+        if boundary_sets[p]
+    }
 
 
 def smooth_vertex_normals_within_patches(

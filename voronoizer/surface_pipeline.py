@@ -34,6 +34,7 @@ them and converts the per-cell boundary loops into prism cutters that
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -62,7 +63,7 @@ from voronoizer.surface_prism import build_prism_from_loop
 from voronoizer.surface_voronoi import (
     assign_cell_labels,
     face_components,
-    patch_boundary_vertex_indices,
+    patch_boundary_vertices_by_id,
     patch_is_flat,
     smooth_vertex_normals_within_patches,
     subdivide_for_geodesic,
@@ -124,8 +125,7 @@ def _polygon_clip_and_inset(
 
 def _patch_clip_halfplanes(
     mesh: trimesh.Trimesh,
-    face_comp: np.ndarray,
-    comp_id: int,
+    boundary_vs: np.ndarray | None,
     seed: np.ndarray,
     u: np.ndarray,
     v: np.ndarray,
@@ -139,9 +139,11 @@ def _patch_clip_halfplanes(
     `HalfspaceIntersection` format `(A_x, A_y, c)` with `A·x + c ≤ 0`,
     *before* applying the shell-thickness inset margin; the caller adds
     that to the `c` term.
+
+    `boundary_vs` is the precomputed (cached) array of patch-boundary
+    mesh vertex indices, or None for patches with no boundary.
     """
-    boundary_vs = patch_boundary_vertex_indices(mesh, face_comp, comp_id)
-    if len(boundary_vs) < 3:
+    if boundary_vs is None or len(boundary_vs) < 3:
         return None
     rel = mesh.vertices[boundary_vs] - seed
     pts2d = np.column_stack([rel @ u, rel @ v])
@@ -204,6 +206,24 @@ def build_geodesic_cells(
     # them for the per-patch labelling, and the per-cell loop downstream
     # needs them to look up patch-boundary clipping half-planes.
     face_comp = face_components(sub_mesh, sharp_angle_deg)
+
+    # Per-patch caches hoisted out of the per-cell loop. Without these
+    # the loop ran patch_boundary_vertex_indices() and patch_is_flat()
+    # once per cell — each does a full-mesh sweep, so on a 200k-face
+    # subdivision with 30 seeds across 6 patches the same patch's
+    # boundary got recomputed 10× per cell × 30 cells. Caching drops
+    # ~90 % of per-cell time on cube/sphere benchmarks.
+    with progress.step("precompute per-patch boundary caches"):
+        patch_boundary_vs = patch_boundary_vertices_by_id(sub_mesh, face_comp)
+        n_patches_total = int(face_comp.max()) + 1 if len(face_comp) else 0
+        patch_has_boundary = np.array(
+            [len(patch_boundary_vs.get(p, ())) >= 3 for p in range(n_patches_total)],
+            dtype=bool,
+        )
+        patch_flat_cache = np.array(
+            [patch_is_flat(sub_mesh, face_comp, p) for p in range(n_patches_total)],
+            dtype=bool,
+        )
 
     # Smooth the subdivided mesh's vertex normals within each smooth
     # patch. After uniform subdivision every child face inherits its
@@ -288,6 +308,21 @@ def build_geodesic_cells(
     safety = max(1.0, shell_thickness)
     inset_distance = strut_thickness / 2.0
 
+    # Per-phase aggregate timers for the per-cell loop. Reported via
+    # progress.log at the end so they only print under --verbose. The
+    # time.perf_counter() calls are cheap (~50 ns) so they stay
+    # unconditional.
+    phase_times = {
+        "resample": 0.0,
+        "prefilter": 0.0,
+        "polygon_2d": 0.0,
+        "patch_clip_setup": 0.0,
+        "inset_or_project": 0.0,
+        "bezier_smooth": 0.0,
+        "local_radius": 0.0,
+        "prism_build": 0.0,
+    }
+
     iterator = progress.progress(range(n_real), desc="build cells", total=n_real)
     for s_idx in iterator:
         loops = loops_per_cell.get(s_idx, [])
@@ -304,7 +339,9 @@ def build_geodesic_cells(
         seed = seeds.points[s_idx]
         seed_normal = seeds.normals[s_idx]
 
+        _t = time.perf_counter()
         loop = resample_loop_arclen(loop, sub_mesh, proximity, target_step=resample_step)
+        phase_times["resample"] += time.perf_counter() - _t
         if len(loop) < 3:
             stats.too_few_vertices += 1
             continue
@@ -321,17 +358,15 @@ def build_geodesic_cells(
         # an adjacent face past a fillet) are removed before the convex
         # hull. Otherwise (multi-patch mesh OR smooth-everywhere patch)
         # the full loop is used unchanged.
+        _t = time.perf_counter()
         patch_id_pre = int(seed_patch[s_idx])
-        patch_has_boundary = len(
-            patch_boundary_vertex_indices(sub_mesh, face_comp, patch_id_pre)
-        ) >= 3
         patch_is_featured = math.degrees(
             patch_max_dihedral_rad[patch_id_pre]
         ) >= _FEATURE_PATCH_MIN_DIHEDRAL_DEG
         seed_n_arr = np.asarray(seed_normal, dtype=float)
         seed_n_arr = seed_n_arr / max(float(np.linalg.norm(seed_n_arr)), 1e-12)
         if (
-            not patch_has_boundary
+            not patch_has_boundary[patch_id_pre]
             and patch_is_featured
             and len(loop) > 0
         ):
@@ -352,6 +387,7 @@ def build_geodesic_cells(
                     face_ids=loop.face_ids[combined_keep],
                     normals=loop.normals[combined_keep],
                 )
+        phase_times["prefilter"] += time.perf_counter() - _t
 
         # Polygon construction in the seed's 2D tangent plane, fed by the
         # surface loop. Doing the inset + Bézier in 2D avoids the
@@ -362,7 +398,9 @@ def build_geodesic_cells(
         # In 2D tangent the inset shrinks the polygon by `strut/2`
         # unconditionally; surface projection happens only once, after
         # smoothing, when the final 2D polygon is lifted to the mesh.
+        _t = time.perf_counter()
         poly = convex_polygon_2d_in_tangent(loop, seed, seed_normal)
+        phase_times["polygon_2d"] += time.perf_counter() - _t
         if poly is None:
             stats.too_few_vertices += 1
             continue
@@ -388,11 +426,17 @@ def build_geodesic_cells(
         #     ~R·(θ − arctan(sin θ)) of cell radius on curved patches
         #     and that's what was making sphere walls visibly wider than
         #     cube walls.
+        _t = time.perf_counter()
         patch_id = int(seed_patch[s_idx])
-        flat = patch_is_flat(sub_mesh, face_comp, patch_id)
+        flat = bool(patch_flat_cache[patch_id])
         patch_clip = _patch_clip_halfplanes(
-            sub_mesh, face_comp, patch_id, seed, u_basis, v_basis
+            sub_mesh,
+            patch_boundary_vs.get(patch_id),
+            seed, u_basis, v_basis,
         )
+        phase_times["patch_clip_setup"] += time.perf_counter() - _t
+
+        _t = time.perf_counter()
         if flat:
             inset_2d = _polygon_clip_and_inset(
                 polygon_2d,
@@ -401,6 +445,7 @@ def build_geodesic_cells(
                 shell_thickness=shell_thickness,
             )
             if inset_2d is None or len(inset_2d) < 3:
+                phase_times["inset_or_project"] += time.perf_counter() - _t
                 stats.too_few_vertices += 1
                 continue
             inset_loop = project_polygon_2d_to_surface(
@@ -411,6 +456,7 @@ def build_geodesic_cells(
             # hull vertices' ORIGINAL surface positions; no 2D round-trip.
             hull_idx = convex_hull_indices_in_tangent(loop, seed, seed_normal)
             if hull_idx is None or len(hull_idx) < 3:
+                phase_times["inset_or_project"] += time.perf_counter() - _t
                 stats.too_few_vertices += 1
                 continue
             hull_loop = Loop(
@@ -431,6 +477,7 @@ def build_geodesic_cells(
                 shell_thickness=shell_thickness,
             )
             if clipped_2d is None or len(clipped_2d) < 3:
+                phase_times["inset_or_project"] += time.perf_counter() - _t
                 stats.too_few_vertices += 1
                 continue
             clipped_loop = project_polygon_2d_to_surface(
@@ -439,15 +486,19 @@ def build_geodesic_cells(
             inset_loop = inset_loop_on_surface(
                 clipped_loop, sub_mesh, proximity, inset=inset_distance
             )
+        phase_times["inset_or_project"] += time.perf_counter() - _t
         if len(inset_loop) < 3:
             stats.too_few_vertices += 1
             continue
         # Bézier smoothing ON THE SURFACE — each sample snapped to the mesh.
+        _t = time.perf_counter()
         loop = bezier_smooth_on_surface(inset_loop, sub_mesh, proximity)
+        phase_times["bezier_smooth"] += time.perf_counter() - _t
         if len(loop) < 3:
             stats.too_few_vertices += 1
             continue
 
+        _t = time.perf_counter()
         if seed_tree is None:
             R_local = float("inf")
         else:
@@ -457,7 +508,9 @@ def build_geodesic_cells(
             R_local = _estimate_local_radius(
                 seed, seed_normal, seeds.points[kidx], seeds.normals[kidx]
             )
+        phase_times["local_radius"] += time.perf_counter() - _t
 
+        _t = time.perf_counter()
         try:
             prism = build_prism_from_loop(
                 loop=loop,
@@ -471,8 +524,10 @@ def build_geodesic_cells(
                 safety=safety,
             )
         except Exception:
+            phase_times["prism_build"] += time.perf_counter() - _t
             stats.prism_failed += 1
             continue
+        phase_times["prism_build"] += time.perf_counter() - _t
         if len(prism.faces) == 0:
             stats.prism_failed += 1
             continue
@@ -491,6 +546,20 @@ def build_geodesic_cells(
         progress.warn(msg)
     else:
         progress.log(msg)
+
+    # Per-phase aggregates over the per-cell loop, sorted by time.
+    total_phase = sum(phase_times.values())
+    if total_phase > 0:
+        ordered = sorted(phase_times.items(), key=lambda kv: kv[1], reverse=True)
+        breakdown = ", ".join(
+            f"{name}={dt:.2f}s ({100.0 * dt / total_phase:.0f}%)"
+            for name, dt in ordered
+        )
+        progress.log(
+            f"per-cell phase totals (sum {total_phase:.2f}s over {n_real} cells): "
+            f"{breakdown}"
+        )
+
     return cells, stats
 
 
