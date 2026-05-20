@@ -1,12 +1,5 @@
-"""Prism-builder primitives shared with the geodesic engine.
+"""Prism-builder primitives shared with the surface pipeline.
 
-The geodesic pipeline (`voronoizer.surface_pipeline`) drives cell
-construction; the helpers below take care of:
-
-  * `_inset_polygon_2d`    — shrink a 2D convex polygon by an offset
-                             (used for the strut gap).
-  * `_bezier_smooth`       — smooth a closed polygon with quadratic Béziers
-                             anchored at edge midpoints.
   * `_estimate_local_radius` — surface curvature estimate from same-patch
                              neighbours, used to size the cap height.
   * `_build_prism_surface_aware` — extrude per-vertex (P, n, d_out) frames
@@ -20,63 +13,8 @@ from __future__ import annotations
 
 import numpy as np
 import trimesh
-from scipy.spatial import ConvexHull, HalfspaceIntersection
-
-try:
-    from scipy.spatial import QhullError
-except ImportError:
-    from scipy.spatial.qhull import QhullError
 
 from voronoizer import progress
-
-
-# Default Bézier sampling: more = smoother boundary / more triangles per cell.
-_BEZIER_SAMPLES_PER_EDGE = 6
-
-
-def _inset_polygon_2d(
-    polygon: np.ndarray, offset: float, interior: np.ndarray
-) -> np.ndarray | None:
-    """Inset (shrink) a 2D convex polygon by `offset`. CCW result or None."""
-    if len(polygon) < 3:
-        return None
-    try:
-        hull = ConvexHull(polygon)
-    except QhullError:
-        return None
-    eqs = hull.equations.copy()
-    eqs[:, 2] += offset
-    try:
-        hsi = HalfspaceIntersection(eqs, interior)
-    except (QhullError, ValueError):
-        return None
-    pts = np.asarray(hsi.intersections)
-    if len(pts) < 3:
-        return None
-    try:
-        h = ConvexHull(pts)
-    except QhullError:
-        return None
-    return pts[h.vertices]
-
-
-def _bezier_smooth(polygon: np.ndarray, samples_per_edge: int) -> np.ndarray:
-    """Smooth a closed convex polygon with quadratic Bézier curves.
-
-    For each edge V[i]→V[i+1] we use midpoints as endpoints and V[i] as the
-    control point. The smooth curve stays inside the convex polygon, so two
-    inset cells preserve the `strut_thickness` gap between them.
-    """
-    N = len(polygon)
-    nxt = (np.arange(N) + 1) % N
-    mid = (polygon + polygon[nxt]) * 0.5
-    prev_mid = np.roll(mid, 1, axis=0)
-    ts = np.linspace(0.0, 1.0, samples_per_edge, endpoint=False).reshape(-1, 1)
-    chunks: list[np.ndarray] = []
-    for i in range(N):
-        p0, p1, p2 = prev_mid[i], polygon[i], mid[i]
-        chunks.append(((1 - ts) ** 2) * p0 + (2 * (1 - ts) * ts) * p1 + (ts ** 2) * p2)
-    return np.vstack(chunks)
 
 
 def _estimate_local_radius(

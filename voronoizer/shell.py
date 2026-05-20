@@ -65,7 +65,7 @@ def _offset_vertices_inward_lsq(
 
 
 def _build_shell_smooth(
-    mesh: trimesh.Trimesh, thickness: float
+    mesh: trimesh.Trimesh, thickness: float, sharp_angle_deg: float
 ) -> tuple[trimesh.Trimesh, trimesh.Trimesh]:
     """Subdivide + smoothed-vertex-normal offset for a smooth inner surface.
 
@@ -97,7 +97,7 @@ def _build_shell_smooth(
     target_edge = max(thickness * 2.0, 1.0)
     sub = subdivide_for_geodesic(mesh, target_edge_length=target_edge)
 
-    fc = face_components(sub, sharp_angle_deg=25.0)
+    fc = face_components(sub, sharp_angle_deg=sharp_angle_deg)
     smoothed_n = smooth_vertex_normals_within_patches(sub, fc, iterations=10)
 
     inner_v = sub.vertices - thickness * smoothed_n
@@ -105,8 +105,19 @@ def _build_shell_smooth(
     return sub, inner
 
 
-def build_shell(mesh: trimesh.Trimesh, thickness: float) -> trimesh.Trimesh:
-    """Return `mesh` hollowed into a shell of the given wall thickness."""
+def build_shell(
+    mesh: trimesh.Trimesh,
+    thickness: float,
+    sharp_angle_deg: float = 25.0,
+) -> trimesh.Trimesh:
+    """Return `mesh` hollowed into a shell of the given wall thickness.
+
+    `sharp_angle_deg` controls the dihedral threshold used to decide whether
+    the input is multi-patch (LSQ offset on the original mesh) or
+    single-patch (subdivide + smoothed-normal offset). Must match the
+    pipeline-wide `--soft-edge-angle` so the shell's patch decomposition
+    agrees with the cell engine's downstream.
+    """
     if thickness <= 0:
         raise ValueError("thickness must be > 0")
     if len(mesh.faces) == 0:
@@ -119,7 +130,7 @@ def build_shell(mesh: trimesh.Trimesh, thickness: float) -> trimesh.Trimesh:
     # and tracks a smooth offset (avoids visibly jagged hole edges on the
     # inside when cells perforate a low-poly smooth body).
     from voronoizer.surface_voronoi import face_components
-    fc = face_components(mesh, sharp_angle_deg=25.0)
+    fc = face_components(mesh, sharp_angle_deg=sharp_angle_deg)
     n_patches = int(fc.max()) + 1 if len(fc) else 0
 
     if n_patches >= 2:
@@ -131,7 +142,7 @@ def build_shell(mesh: trimesh.Trimesh, thickness: float) -> trimesh.Trimesh:
         outer = mesh
     else:
         with progress.step("offset inner cavity (smoothed normals; no sharp edges)"):
-            outer, inner = _build_shell_smooth(mesh, thickness)
+            outer, inner = _build_shell_smooth(mesh, thickness, sharp_angle_deg)
 
     if not inner.is_watertight:
         progress.warn(

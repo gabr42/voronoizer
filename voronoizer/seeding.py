@@ -20,7 +20,11 @@ class Seeds:
         return len(self.points)
 
 
-def _top_bottom_face_mask(mesh: trimesh.Trimesh, angle_deg: float) -> np.ndarray:
+def top_bottom_face_mask(mesh: trimesh.Trimesh, angle_deg: float) -> np.ndarray:
+    """Boolean mask over `mesh.faces`: True iff the face normal is within
+    `angle_deg` of ±Z (i.e. counts as a top/bottom face for the
+    `--top-bottom-only` mode).
+    """
     threshold = math.cos(math.radians(angle_deg))
     nz = np.abs(mesh.face_normals[:, 2])
     return nz >= threshold
@@ -38,7 +42,7 @@ def sample_seeds_per_patch(
 ) -> Seeds:
     """Sample seeds with per-patch distribution proportional to patch area.
 
-    Phase 2 (geodesic engine) needs at least one seed per smooth patch.
+    The cell-labelling engine needs at least one seed per smooth patch.
     Without it, faces in seedless patches fall back to global nearest-seed
     (3D Euclidean across patch boundaries) and the cell boundaries jump
     across sharp edges — producing degenerate prism geometry the boolean
@@ -56,7 +60,7 @@ def sample_seeds_per_patch(
 
     src = mesh
     if top_bottom_only:
-        mask = _top_bottom_face_mask(mesh, angle_deg)
+        mask = top_bottom_face_mask(mesh, angle_deg)
         kept = int(mask.sum())
         if kept == 0:
             raise ValueError(
@@ -85,38 +89,62 @@ def sample_seeds_per_patch(
             f"seeding: no patch is larger than the minimum area {min_patch_area:.2f} mm²"
         )
 
+    n_eligible = int(eligible.sum())
     total_eligible_area = float(patch_area[eligible].sum())
     raw_alloc = np.where(
         eligible, count * patch_area / total_eligible_area, 0.0
     )
-    seeds_per_patch = np.where(
-        eligible, np.maximum(min_per_patch, np.round(raw_alloc)), 0
-    ).astype(int)
 
-    # Reconcile the rounded total with `count`: trim from the most
-    # over-allocated patches (above their proportional share) and add
-    # to the most under-allocated ones, leaving the minimum intact.
-    diff = int(seeds_per_patch.sum() - count)
-    safety = 0
-    while diff != 0 and safety < n_patches * 4:
-        safety += 1
-        if diff > 0:
-            excess = seeds_per_patch.astype(float) - raw_alloc
-            excess[~eligible] = -np.inf
-            excess[seeds_per_patch <= min_per_patch] = -np.inf
-            idx = int(np.argmax(excess))
-            if not np.isfinite(excess[idx]):
-                break
-            seeds_per_patch[idx] -= 1
-            diff -= 1
-        else:
-            deficit = raw_alloc - seeds_per_patch.astype(float)
-            deficit[~eligible] = -np.inf
-            idx = int(np.argmax(deficit))
-            if not np.isfinite(deficit[idx]):
-                break
-            seeds_per_patch[idx] += 1
-            diff += 1
+    if count < n_eligible:
+        # Fewer seeds requested than eligible patches. The `min_per_patch`
+        # floor would otherwise force `n_eligible` seeds and silently
+        # exceed the user's `--holes`. Allocate one seed to the `count`
+        # largest patches; smaller patches go unseeded and their faces
+        # fall through to the global-nearest-seed fallback in
+        # `assign_cell_labels`. Those faces will be claimed by cells in
+        # adjacent patches, which means the resulting cells span sharp
+        # edges — the user-visible consequence of asking for fewer holes
+        # than the surface has natural facets.
+        seeds_per_patch = np.zeros(n_patches, dtype=int)
+        ranked_areas = np.where(eligible, patch_area, -np.inf)
+        top = np.argsort(ranked_areas)[::-1][:count]
+        seeds_per_patch[top] = 1
+        progress.warn(
+            f"--holes {count} is less than the {n_eligible} eligible "
+            f"patch(es); seeding the {count} largest patch(es) only — "
+            f"cells in the remaining {n_eligible - count} patch(es) will "
+            f"be absorbed by neighbouring cells via the nearest-seed "
+            f"fallback and may span sharp edges"
+        )
+    else:
+        seeds_per_patch = np.where(
+            eligible, np.maximum(min_per_patch, np.round(raw_alloc)), 0
+        ).astype(int)
+
+        # Reconcile the rounded total with `count`: trim from the most
+        # over-allocated patches (above their proportional share) and add
+        # to the most under-allocated ones, leaving the minimum intact.
+        diff = int(seeds_per_patch.sum() - count)
+        safety = 0
+        while diff != 0 and safety < n_patches * 4:
+            safety += 1
+            if diff > 0:
+                excess = seeds_per_patch.astype(float) - raw_alloc
+                excess[~eligible] = -np.inf
+                excess[seeds_per_patch <= min_per_patch] = -np.inf
+                idx = int(np.argmax(excess))
+                if not np.isfinite(excess[idx]):
+                    break
+                seeds_per_patch[idx] -= 1
+                diff -= 1
+            else:
+                deficit = raw_alloc - seeds_per_patch.astype(float)
+                deficit[~eligible] = -np.inf
+                idx = int(np.argmax(deficit))
+                if not np.isfinite(deficit[idx]):
+                    break
+                seeds_per_patch[idx] += 1
+                diff += 1
 
     progress.log(
         f"per-patch seeding: {n_patches} total patch(es), "
@@ -166,7 +194,8 @@ def sample_seeds_per_patch(
         if len(pts) == 0:
             try:
                 pts, fidx = trimesh.sample.sample_surface(
-                    patch_sub, max(1, n_pat), seed=seed_int + 1
+                    patch_sub, max(1, n_pat),
+                    seed=int(rng.integers(0, 2**31 - 1)),
                 )
                 pts = np.asarray(pts); fidx = np.asarray(fidx)
             except Exception:

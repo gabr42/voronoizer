@@ -14,6 +14,7 @@ from voronoizer.perforate import perforate
 from voronoizer.seeding import sample_seeds_per_patch
 from voronoizer.shell import build_shell
 from voronoizer.surface_pipeline import build_geodesic_cells
+from voronoizer.voronoi_cells import _clamp_chamfer_value
 
 
 def _clip_cutters_to_bbox(
@@ -70,11 +71,19 @@ def run(
     t0 = time.perf_counter()
     rng = np.random.default_rng(seed)
 
+    chamfer = _clamp_chamfer_value(
+        chamfer, strut_thickness, shell_thickness, "--chamfer"
+    )
+    if chamfer_inner is not None:
+        chamfer_inner = _clamp_chamfer_value(
+            chamfer_inner, strut_thickness, shell_thickness, "--inner-chamfer"
+        )
+
     with progress.step("load STL"):
         mesh = load_stl(input_path, repair=repair)
 
     with progress.step("build hollow shell"):
-        shell = build_shell(mesh, shell_thickness)
+        shell = build_shell(mesh, shell_thickness, soft_edge_angle_deg)
 
     if shell_only:
         with progress.step("write STL"):
@@ -104,8 +113,8 @@ def run(
     # from (a submesh in --top-bottom-only mode, otherwise the full mesh).
     edge_source = mesh
     if top_bottom_only:
-        from voronoizer.seeding import _top_bottom_face_mask  # type: ignore[attr-defined]
-        mask = _top_bottom_face_mask(mesh, normal_angle_deg)
+        from voronoizer.seeding import top_bottom_face_mask
+        mask = top_bottom_face_mask(mesh, normal_angle_deg)
         if mask.any():
             edge_source = mesh.submesh([np.where(mask)[0]], append=True)
 

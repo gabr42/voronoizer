@@ -1,12 +1,8 @@
-"""Geodesic Voronoi engine — Stage 6 of the Phase 2 pipeline.
+"""Prism cutter construction from an inset surface loop.
 
-Build a prism cutter from an inset surface loop. Reuses Phase 1's
-`_build_prism_surface_aware` — Phase 1 already takes per-vertex
-`(P, n, d_out)` triples; the only thing Phase 2 needs to supply is those
-triples computed directly from the surface loop rather than projected from
-a tangent-plane polygon.
-
-Stage 7 of the pipeline (boolean subtract) is unchanged from Phase 1.
+`_build_prism_surface_aware` takes per-vertex `(P, n, d_out)` triples; this
+module's job is to derive those triples directly from a surface loop and
+hand them off.
 """
 
 from __future__ import annotations
@@ -29,7 +25,7 @@ def build_prism_from_loop(
     safety: float,
     chamfer_inner: float | None = None,
 ) -> trimesh.Trimesh:
-    """Build a surface-aware prism cutter from a Phase-2 inset loop.
+    """Build a surface-aware prism cutter from an inset loop.
 
     For each loop vertex i:
       * `P_i` = `loop.positions[i]` (already on the mesh surface).
@@ -41,9 +37,8 @@ def build_prism_from_loop(
         ring back along.
 
     The boundary tangent and the outward direction are both purely surface-
-    intrinsic; no tangent-plane projection from the seed is involved. That's
-    the whole point of Phase 2 — every prism vertex sits on the actual mesh
-    even when the cell spans a curved or sharp-edged region of the surface.
+    intrinsic; every prism vertex sits on the actual mesh even when the
+    cell spans a curved or sharp-edged region of the surface.
     """
     if len(loop) < 3:
         raise ValueError(
@@ -52,13 +47,12 @@ def build_prism_from_loop(
         )
     P = loop.positions
     _ = mesh  # kept in signature; no longer used directly here
-    # Per-cell normal mode. The geodesic boundary often makes a cell
-    # span a large angular range of surface normals — on the user's CAD
-    # body, the mean per-cell normal spread is ~47° because each cell
-    # naturally crosses a flat face plus a fillet plus another flat
-    # face. Using per-vertex smoothed normals there gives prism walls
-    # that visibly tilt along the cell perimeter — the "jagged cutter"
-    # the user reported.
+    # Per-cell normal mode. The surface boundary often makes a cell span
+    # a large angular range of surface normals — on the CAD body fixture
+    # the mean per-cell normal spread is ~47° because each cell naturally
+    # crosses a flat face plus a fillet plus another flat face. Using
+    # per-vertex smoothed normals there gives prism walls that visibly
+    # tilt along the cell perimeter.
     #
     # Decision:
     #
@@ -66,16 +60,16 @@ def build_prism_from_loop(
     #     the cell sits inside a flat region — extrude the whole prism
     #     along the SINGLE average normal. Clean perpendicular cut.
     #
-    #   * If the spread is moderate-to-large (any spread above 5° on a
-    #     mesh with sharp dihedrals at all) — use the SEED's normal for
-    #     the whole cell. This is the Phase-1 "tangent plane" behaviour:
-    #     the prism is a simple polygonal extrusion perpendicular to
-    #     the seed's face, regardless of how the cell's loop wraps. On
-    #     a mostly-flat CAD body that gives smooth holes; on a sphere
-    #     each cell becomes a flat-cap circular hole (still smooth).
-    #     The previous per-vertex approach was trying to follow surface
-    #     curvature but the smoothed normals weren't smooth enough to
-    #     do it without visible faceting on coarse low-poly inputs.
+    #   * Moderate spread (5°–30°) — use per-vertex normals; they follow
+    #     curvature smoothly enough that walls stay continuous.
+    #
+    #   * Large spread (> 30°) — cell straddles a feature boundary.
+    #     Fall back to the seed's face normal for the whole cell so the
+    #     prism becomes a clean perpendicular cut through the seed's
+    #     local face. On a cell crossing a fillet the hole follows the
+    #     seed face's direction even where the cell extends onto the
+    #     fillet, but that looks cleaner than the stepped surface-
+    #     following alternative.
     avg_n = loop.normals.mean(axis=0)
     avg_n_len = float(np.linalg.norm(avg_n))
     if avg_n_len > 1e-9:
@@ -97,17 +91,8 @@ def build_prism_from_loop(
         # smoothly enough that the walls look continuous.
         n = loop.normals
     else:
-        # Cell straddles a feature boundary (a fillet between flat
-        # regions on the body — typical spread is 30-90°). Per-vertex
-        # smoothed normals jump abruptly at the parent-face boundaries
-        # the smoothing couldn't fully average out, giving the user-
-        # visible "jagged cutter" facets. Fall back to extrusion along
-        # the SEED's face normal: the prism becomes a clean perpendicular
-        # cut through the seed's local face, like Phase 1's tangent-plane
-        # extrusion. On a cell crossing a fillet that means the hole
-        # follows the seed's face's direction even where the cell
-        # extends onto the fillet — but that looks cleaner than the
-        # stepped surface-following alternative.
+        # Cell straddles a feature boundary; fall back to the seed's
+        # face normal (see the decision comment above).
         sn = np.asarray(seed_normal, dtype=float)
         sn = sn / max(float(np.linalg.norm(sn)), 1e-12)
         n = np.broadcast_to(sn, loop.normals.shape).copy()
@@ -119,16 +104,16 @@ def build_prism_from_loop(
     # right perpendicular is outward).
     d_out = _normalize_rows(np.cross(fwd, n))
 
-    # Phase 1's prism builder uses `polygon_2d` only for vertex count, so a
-    # zeros stand-in is harmless. P/n/d_out drive the actual ring geometry.
+    # `_build_prism_surface_aware` uses `polygon_2d` only for vertex count,
+    # so a zeros stand-in is harmless. P/n/d_out drive the actual ring geometry.
     polygon_2d_stub = np.zeros((len(loop), 2), dtype=float)
 
-    # Phase 2 boundary loops can wrap around sharp surface edges where two
+    # Boundary loops can wrap around sharp surface edges where two
     # adjacent loop vertices have very different normals. Even on a flat
     # input mesh (cube), the prism wall then passes exactly along the
     # cube's corner edge and manifold3d emits twin vertices unless the
     # outer/inner rings are lifted slightly off the surface. We force the
-    # lift on for the geodesic engine regardless of `R_local`.
+    # lift on regardless of `R_local`.
     return _build_prism_surface_aware(
         polygon_2d=polygon_2d_stub,
         P=P,

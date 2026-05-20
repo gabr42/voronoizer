@@ -29,7 +29,28 @@ import trimesh
 ROOT = Path(__file__).resolve().parent.parent
 VORONOIZER = ROOT / ".venv" / "Scripts" / "voronoizer.exe"
 DATA = ROOT / "tests" / "data"
+MAKE_TEST_STL = ROOT / "tests" / "make_test_stl.py"
 SEED = 613805311  # the seed from the last user-reported Unnamed-Body run
+
+
+def ensure_test_fixtures() -> None:
+    """Run `make_test_stl.py` if any of the fixtures it generates are missing.
+
+    Lets a fresh checkout run `regression.py` without a manual setup step.
+    """
+    needed = [
+        DATA / "cube_100mm.stl",
+        DATA / "sphere_r50mm.stl",
+        DATA / "cyl_r30_h120mm.stl",
+    ]
+    if all(p.exists() for p in needed):
+        return
+    print(f"generating missing test fixtures via {MAKE_TEST_STL.name} ...",
+          flush=True)
+    subprocess.run(
+        [sys.executable, str(MAKE_TEST_STL)],
+        check=True, cwd=ROOT,
+    )
 
 
 @dataclass
@@ -203,6 +224,8 @@ def main() -> int:
     if not VORONOIZER.exists():
         print(f"error: voronoizer.exe not found at {VORONOIZER}", file=sys.stderr)
         return 2
+
+    ensure_test_fixtures()
 
     cases = build_matrix(args.quick)
     if args.filter:

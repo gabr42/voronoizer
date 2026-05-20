@@ -1,16 +1,15 @@
-"""Geodesic Voronoi engine — Stages 3, 4 & 5 of the Phase 2 pipeline.
+"""Cell-boundary loop extraction, smoothing, and surface inset.
 
-Given per-face cell labels from Stage 2, we:
-  * extract boundary half-edges (Stage 3),
+Given per-face cell labels, we:
+  * extract boundary half-edges,
   * walk them per-cell into closed 3D polylines on the mesh surface,
-  * smooth each polyline with a quadratic Bézier pass + surface re-projection
-    (Stage 4),
+  * smooth each polyline with a quadratic Bézier pass + surface re-projection,
   * inset each polyline inward by `strut / 2` along the surface tangent
-    perpendicular to the local boundary direction (Stage 5).
+    perpendicular to the local boundary direction.
 
 Each `Loop` carries per-vertex 3D positions and the face index each position
 sits on — that face's normal becomes the local outward surface normal used by
-Stage 5 and Stage 6.
+the inset and prism-building stages.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ except ImportError:
     from scipy.spatial.qhull import QhullError
 
 
-# Bézier smoothing matches Phase 1's tangent-frame smoothing.
+# Bézier samples per polygon edge. Higher = smoother boundary, more triangles.
 _BEZIER_SAMPLES_PER_EDGE = 6
 
 
@@ -211,9 +210,7 @@ def extract_cell_loops(
 
 # Floor on the resampled vertex count before Bézier — guards against very
 # tiny cells degenerating to a triangle that the Bézier pass can't smooth
-# meaningfully. Phase 1 typically produced 6–10 inset polygon vertices; a
-# higher floor here gives Phase 2 enough resolution to follow surface
-# curvature even on a small cell.
+# meaningfully.
 _MIN_RESAMPLED_VERTICES = 12
 
 
@@ -235,10 +232,10 @@ def resample_loop_arclen(
 ) -> Loop:
     """Resample the loop to roughly uniform arc-length spacing.
 
-    The raw Dijkstra loop follows mesh edges and can have hundreds of
-    vertices when Stage 1 over-subdivides for boundary quality. Downstream
-    prism construction wants a much coarser polygon (Phase 1 used 6–10
-    vertices); resampling here decouples loop density from mesh density.
+    The raw boundary loop follows mesh edges and can have hundreds of
+    vertices when the subdivision is fine. Downstream prism construction
+    wants a much coarser polygon (typically 6–10 vertices); resampling
+    here decouples loop density from mesh density.
     """
     if len(loop) < 3:
         return loop
@@ -403,9 +400,9 @@ def _bezier_samples(
 ) -> np.ndarray:
     """Quadratic Bézier smoothing of a closed 3D polyline.
 
-    Mirrors Phase 1's `_bezier_smooth`: for each edge V[i] -> V[i+1] take the
-    midpoints as endpoints and V[i] as the control point. Returns the
-    concatenated sample points (`N * samples_per_edge` rows).
+    For each edge V[i] -> V[i+1] take the midpoints as endpoints and V[i]
+    as the control point. Returns the concatenated sample points
+    (`N * samples_per_edge` rows).
     """
     N = len(polyline)
     nxt = (np.arange(N) + 1) % N
@@ -454,48 +451,6 @@ def bezier_smooth_on_surface(
 def _normalize_rows(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     n = np.linalg.norm(v, axis=1, keepdims=True)
     return v / np.maximum(n, eps)
-
-
-def dedupe_loop(
-    loop: Loop, mesh: trimesh.Trimesh, min_segment_length: float
-) -> Loop:
-    """Drop loop vertices whose edge to the next vertex is too short.
-
-    After Bézier smoothing followed by inset + surface re-projection, two
-    consecutive loop vertices can land at near-coincident 3D positions —
-    especially on inputs with sharp edges, where one face's inset
-    projection lands near another face's projection. The resulting
-    near-zero-length segment makes a degenerate prism wall sliver that
-    manifold3d turns into twin vertices in the final boolean.
-    """
-    if len(loop) < 4:
-        return loop
-    P = loop.positions
-    N = len(P)
-    keep = np.ones(N, dtype=bool)
-    # Greedy: walk forward, drop next vertex if too close, keep doing so
-    # until a far-enough vertex is found.
-    last_kept = 0
-    for i in range(1, N):
-        d = float(np.linalg.norm(P[i] - P[last_kept]))
-        if d < min_segment_length:
-            keep[i] = False
-        else:
-            last_kept = i
-    # Close the loop: if the last kept vertex is too close to the first,
-    # drop it too (don't break the polygon if doing so leaves < 3 verts).
-    while keep.sum() > 3 and (
-        np.linalg.norm(P[np.where(keep)[0][-1]] - P[np.where(keep)[0][0]])
-        < min_segment_length
-    ):
-        keep[np.where(keep)[0][-1]] = False
-    if keep.sum() < 3:
-        return loop  # would degenerate; leave as-is
-    return Loop(
-        positions=P[keep],
-        face_ids=loop.face_ids[keep],
-        normals=loop.normals[keep],
-    )
 
 
 def inset_loop_on_surface(
